@@ -1,0 +1,4 @@
+[submodule "src/twpa_design/external_packages/JosephsonCircuits.jl"]
+	path = src/twpa_design/external_packages/JosephsonCircuits.jl
+	url = https://github.com/MaxMalnou/JosephsonCircuits.jl.git
+	branch = taylor-expansion-feature

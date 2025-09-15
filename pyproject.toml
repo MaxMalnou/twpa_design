@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twpa_design"
+version = "0.1.0"
+description = "TWPA design and simulation tools"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=2.0",
+    "matplotlib>=3.5",
+    "scipy>=1.7",
+    "mpmath>=1.2",
+    "julia>=0.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black",
+    "pylint",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+twpa_design = ["*.py"]
