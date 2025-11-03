@@ -263,7 +263,7 @@ Open an issue for questions about contributing or using the package.
 If you use this package in your research, please cite:
 
 ```
-Maxime Malnou, "TWPA Design Package: Python tools for designing traveling wave parametric amplifiers," 2025. 
+Maxime Malnou, "TWPA Design Package: Python tools for designing traveling wave parametric amplifiers," 2025.
 Available: https://github.com/MaxMalnou/twpa_design
 ```
 
@@ -277,8 +277,21 @@ Available: https://github.com/MaxMalnou/twpa_design
 }
 ```
 
-### Related Work
-If you use specific methodologies implemented in this package, please also cite the relevant research papers that describe the underlying theory.
+### Related Paper
+
+If you use the design methodologies or simulation framework, please also cite:
+
+```bibtex
+@misc{malnou2025artificial,
+  title = {Artificial Transmission Line Synthesis Tailored for Traveling-Wave Parametric Processes},
+  author = {M. Malnou},
+  year = {2025},
+  eprint = {2510.24753},
+  archivePrefix = {arXiv},
+  primaryClass = {physics.app-ph},
+  url = {https://arxiv.org/abs/2510.24753}
+}
+```
 
 ## Acknowledgments
 
