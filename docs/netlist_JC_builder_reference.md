@@ -24,26 +24,29 @@ Configuration dataclass for netlist building process.
 config = NetlistConfig(
     # Required
     design_file="b_jtwpa_01.py",      # str: Design file from designs/ folder
-    
+
     # Optional - all have defaults
     use_taylor_insteadof_JJ=False,    # bool: Use Taylor expansion (default: False)
     enable_dielectric_loss=False,     # bool: Add dielectric loss (default: False)
     loss_tangent=2e-4,                # float: tan(δ) value (default: 2e-4)
     use_linear_in_window=True,        # bool: Linear elements in apodization (default: True)
-    Ntot_cell_override=None           # int: Override total cells (default: None)
+    Ntot_cell_override=None,          # int: Override total cells (default: None)
+    output_dir=None                   # str: Output directory (None uses package's netlists/ folder)
 )
 ```
 
 #### Parameters Explained
 
 - **design_file**: Name of the design file in the designs/ folder (required)
-- **use_taylor_insteadof_JJ**: 
+- **use_taylor_insteadof_JJ**: (Only affects JJ-based devices; no effect on KI devices)
   - `False`: Use JosephsonCircuits.jl hardcoded JJ potential (more accurate)
   - `True`: Use Taylor expansion with c1, c2, c3, c4 coefficients
+  - Note: KI devices always use Taylor expansion regardless of this setting
 - **enable_dielectric_loss**: Add loss to all capacitors as complex admittance
 - **loss_tangent**: Dielectric loss tangent tan(δ), typical values 1e-4 to 1e-3
 - **use_linear_in_window**: In windowed periodic structures, use linear L in apodization regions
 - **Ntot_cell_override**: Force different number of cells than design specifies
+- **output_dir**: Custom output directory for netlists (if None, uses package's netlists/ folder)
 
 ---
 
@@ -197,9 +200,15 @@ CJ_F = 1e-15
 beta_L = 0.4
 phi_dc = 1.57  # π/2
 
-# KI-specific parameters
+# KI-specific parameters (required in both config and circuit dicts)
+# config dict:
 Istar_uA = 100.0
-L0_pH = 100.0
+L0_pH = 100.0  # For metadata only
+
+# circuit dict (REQUIRED for netlist building):
+L0_H = 1e-10  # Inductance in Henries - MUST BE NON-ZERO
+# Note: KI devices always use Taylor expansion (c1, c2, etc.)
+#       use_taylor_insteadof_JJ setting has no effect for KI
 
 # Filter parameters (if dispersion_type includes 'filter')
 f_zeros_GHz = [9.0]
@@ -337,16 +346,19 @@ has_loss = any('im' in str(v) for v in parameters.values())
 print(f"Has dielectric loss: {has_loss}")
 ```
 
-### Example 8: Custom Output Directory
+### Example 8: Custom Output Directory (Workspace)
 ```python
 import os
+from twpa_design.netlist_JC_builder import NetlistConfig, build_netlist_from_config
 
-# Save to custom directory
-output_dir = os.path.join(os.getcwd(), "my_netlists")
-os.makedirs(output_dir, exist_ok=True)
+# Save to workspace directory instead of package folder
+workspace_dir = os.path.dirname(os.path.abspath(__file__))
 
-config = NetlistConfig(design_file='4wm_jtwpa_01.py')
-output = build_netlist_from_config(config, output_dir=output_dir)
+config = NetlistConfig(
+    design_file='4wm_jtwpa_01.py',
+    output_dir=workspace_dir  # Specify custom output directory
+)
+output = build_netlist_from_config(config)
 print(f"Saved to: {output}")
 ```
 

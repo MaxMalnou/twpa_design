@@ -1,6 +1,10 @@
 # Julia Wrapper Module - Complete Reference
 
-This module provides a Python interface to JosephsonCircuits.jl for simulating nonlinear TWPA circuits using harmonic balance analysis.
+This module provides a Python interface to JosephsonCircuits.jl for simulating TWPA circuits using harmonic balance analysis.
+
+**Solver Modes:**
+- **Nonlinear mode** (default): Uses `hbsolve` for full nonlinear analysis with pump
+- **Linear mode**: Uses `hblinsolve` for faster linear S-parameter analysis without pump
 
 ## Quick Start
 
@@ -54,7 +58,8 @@ results = simulator.run_full_simulation(
     force_julia_reinit=False,  # bool: Force Julia restart
     save_results=True,      # bool: Auto-save data and plot
     show_plot=True,         # bool: Display plot (default: True)
-    max_mode_order_to_plot=2   # int: Max idler mode order to plot
+    max_mode_order_to_plot=2,  # int: Max idler mode order to plot
+    output_dir=None         # str: Output directory (None uses package's results/ folder)
 )
 ```
 Combines setup_julia, load_netlist, build_circuit, run_simulation, and optionally saves/displays results.
@@ -130,12 +135,15 @@ config = TWPASimulationConfig(
     
     # Harmonic balance parameters
     Npumpharmonics=20,            # int: Pump harmonics (default: 20)
-    Nmodulationharmonics=10,      # int: Modulation harmonics (default: 10)
-    
-    # Nonlinear mixing
-    enable_three_wave_mixing=False,  # bool: Enable 3WM (default: False)
-    enable_four_wave_mixing=True,    # bool: Enable 4WM (default: True)
-    
+    Nmodulationharmonics=None,    # int: Modulation harmonics (auto: 10 for nonlinear, 0 for linear)
+
+    # Nonlinear mixing (auto-set based on solver_mode if None)
+    enable_three_wave_mixing=None,   # bool: Enable 3WM (auto: False nonlinear, None linear = Julia default false)
+    enable_four_wave_mixing=None,    # bool: Enable 4WM (auto: True nonlinear, None linear = Julia default true)
+
+    # Solver mode selection
+    solver_mode="nonlinear",         # str: "nonlinear" (hbsolve) or "linear" (hblinsolve)
+
     # Numerical solver parameters
     iterations=None,              # int: Max iterations (default: 1000)
     ftol=None,                    # float: Function tolerance (default: 1e-8)
@@ -199,8 +207,12 @@ filename = results.save(
     filename=None,
     metadata={"custom_key": "value"},
     config=sim_config,        # Used for auto-naming
-    use_filecounter=True      # Auto-increment filename
+    use_filecounter=True,     # Auto-increment filename
+    output_dir=None           # Output directory (None uses package's results/ folder)
 )
+
+# Save to custom directory
+filename = results.save(config=sim_config, output_dir="/path/to/workspace")
 ```
 Saves results to .npz file. Returns filename.
 
@@ -216,8 +228,12 @@ fig = results.plot(
     save_path="figure.svg",   # Explicit save path
     auto_save=False,          # Auto-save with incremented name
     show_plot=True,           # Display the plot
-    max_mode_order_to_plot=2  # Max idler mode order to plot
+    max_mode_order_to_plot=2, # Max idler mode order to plot
+    output_dir=None           # Output directory (None uses package's results/ folder)
 )
+
+# Save plot to custom directory
+fig = results.plot(config=sim_config, auto_save=True, output_dir="/path/to/workspace")
 ```
 Creates 4-panel figure (S-params, forward/backward idlers, QE). Returns matplotlib Figure.
 
@@ -418,6 +434,93 @@ results.plot(
 
 # Default behavior (up to ±2 mode orders)
 results.plot()  # Equivalent to max_mode_order_to_plot=2
+```
+
+### Example 9: Using Custom Output Directory (Workspace)
+```python
+import os
+from twpa_design.julia_wrapper import TWPASimulator, TWPASimulationConfig
+
+# Get workspace directory
+workspace_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Run simulation and save to workspace
+simulator = TWPASimulator()
+results = simulator.run_full_simulation(
+    netlist_name="4wm_jtwpa_2002cells_01",
+    config=TWPASimulationConfig(
+        freq_start_GHz=6.0,
+        freq_stop_GHz=10.0,
+        pump_freq_GHz=8.63,
+        pump_current_A=2.7e-6
+    ),
+    save_results=True,
+    output_dir=workspace_dir  # Save to workspace instead of package folder!
+)
+
+# Or manually control saving
+results = simulator.run_full_simulation(
+    "4wm_jtwpa_2002cells_01",
+    config,
+    save_results=False  # Don't auto-save
+)
+# Save to workspace manually
+results.save(config=config, output_dir=workspace_dir)
+results.plot(config=config, auto_save=True, output_dir=workspace_dir)
+```
+
+### Example 10: Linear S-parameter Analysis (No Pump)
+```python
+from twpa_design.julia_wrapper import TWPASimulator, TWPASimulationConfig
+
+# Linear analysis mode - simple! Just specify solver_mode="linear"
+# Sensible defaults are applied automatically:
+#   - Nmodulationharmonics=0 (DC + fundamental only)
+#   - enable_three_wave_mixing=None (uses Julia default: false)
+#   - enable_four_wave_mixing=None (uses Julia default: true)
+simulator = TWPASimulator()
+results = simulator.run_full_simulation(
+    netlist_name="4wm_jtwpa_2002cells_01",
+    config=TWPASimulationConfig(
+        freq_start_GHz=4.0,
+        freq_stop_GHz=12.0,
+        freq_step_GHz=0.1,
+        solver_mode="linear"  # That's it! Defaults handle the rest
+    ),
+    save_results=True
+)
+
+# Useful for:
+# - Checking linear transmission/reflection without pump
+# - Faster baseline calculations
+# - Debugging circuit connectivity
+# - Comparing with nonlinear results
+
+# For nonlinear analysis with pump (default):
+results_nonlinear = simulator.run_full_simulation(
+    netlist_name="4wm_jtwpa_2002cells_01",
+    config=TWPASimulationConfig(
+        freq_start_GHz=4.0,
+        freq_stop_GHz=12.0,
+        pump_freq_GHz=8.0,
+        pump_current_A=1e-6,
+        solver_mode="nonlinear"  # Use hbsolve (default)
+    )
+)
+
+# Advanced: Override linear mode defaults if needed for special cases
+results_advanced = simulator.run_full_simulation(
+    netlist_name="4wm_jtwpa_2002cells_01",
+    config=TWPASimulationConfig(
+        freq_start_GHz=4.0,
+        freq_stop_GHz=12.0,
+        solver_mode="linear",
+        Nmodulationharmonics=2,  # Override: include more harmonics
+        enable_four_wave_mixing=True  # Override: enable 4WM modes
+    ),
+    save_results=True
+)
+# User-specified values take precedence over mode defaults!
 ```
 
 ---

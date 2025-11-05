@@ -46,9 +46,6 @@ NETLIST_CONFIGS = {
     },
     'ktwpa': {
         'design_file': '4wm_ktwpa_01.py',
-        'use_taylor_insteadof_JJ': True,
-        'enable_dielectric_loss': False,
-        'use_linear_in_window': True,   
         'Ntot_cell_override': 5000,  # Override total number of cells
     }
 }

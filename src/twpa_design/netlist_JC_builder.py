@@ -32,24 +32,28 @@ from . import DESIGNS_DIR, NETLISTS_DIR
 @dataclass
 class NetlistConfig:
     """Configuration for netlist building.
-    
+
     This handles the build settings for netlist generation:
     - Which design file to load
     - Taylor expansion settings
     - Loss settings
     - Override options
+    - Output directory
     """
     # Input file from notebook 1 (ATL_TWPA_lite)
     design_file: str = "b_jtwpa_01.py"  # File from designs/ folder
 
-    # Build configuration    
+    # Build configuration
     use_taylor_insteadof_JJ: bool = False
     enable_dielectric_loss: bool = False
     loss_tangent: float = 2e-4
     use_linear_in_window: bool = True
-    
+
     # Override for total cells if needed
     Ntot_cell_override: Optional[int] = None
+
+    # Output directory (None uses package's netlists/ folder)
+    output_dir: Optional[str] = None
 
     @property
     def design_path(self):
@@ -1548,7 +1552,10 @@ def prepare_workspace_variables(design_data: Dict, netlist_config: NetlistConfig
         # KI case
         Ic_JJ_uA = None
         CJ_F = Lg_H = np.inf
-        L0_H = params.get('L0_H', 0)
+        L0_H = params.get('L0_H', None)
+        if L0_H is None or L0_H == 0:
+            raise ValueError("L0_H must be defined and non-zero for KI (kinetic inductance) nonlinearity. "
+                           "Check that 'L0_H' is present in the 'circuit' dict of your design file.")
         LJ0_H = 0  # No JJ inductance in KI case
         jj_structure_type = None
     
@@ -1722,14 +1729,23 @@ def build_netlist(prepared_data: Dict) -> Tuple[JCNetlistBuilder, Dict[str, Any]
     width = params.get('width', 0)
     ind_g_C_with_filters = params.get('ind_g_C_with_filters', [])
     nonlinearity = params['nonlinearity']
-    
+
     # All the other parameters needed by expand_supercell_inline
     LTLsec_rem_H = params.get('LTLsec_rem_H', 0)
     Lg_H = params.get('Lg_H', np.inf)
-    L0_H = params.get('L0_H', 0)
+    L0_H = params.get('L0_H', None)
+
+    # Validate L0_H for KI devices
+    if nonlinearity == 'KI' and (L0_H is None or L0_H == 0):
+        raise ValueError("L0_H must be defined and non-zero for KI (kinetic inductance) nonlinearity. "
+                       "Check that 'L0_H' is present in the 'circuit' dict of your design file.")
     epsilon_perA = params.get('epsilon_perA', 0)
     xi_perA2 = params.get('xi_perA2', 0)
-    LTLsec_H = params.get('LTLsec_H', 0)
+    LTLsec_H = params.get('LTLsec_H', None)
+
+    # For KI devices, if LTLsec_H is not specified, use L0_H as the transmission line inductance
+    if nonlinearity == 'KI' and (LTLsec_H is None or LTLsec_H == 0):
+        LTLsec_H = L0_H
     CTLsec_F = params.get('CTLsec_F', 0)
     ngL = params.get('ngL', 1)
     ngC = params.get('ngC', 1)
@@ -1915,7 +1931,7 @@ def build_netlist_from_config(netlist_config: NetlistConfig) -> str:
     ntot_cells = prepared_data['params']['Ntot_cell']
     
     # Step 4: Create output filename
-    output_file = create_output_filename(device_name, ntot_cells) # folder will use default
+    output_file = create_output_filename(device_name, ntot_cells, folder=netlist_config.output_dir)
     
     # Step 5: Build netlist
     builder, stats = build_netlist(prepared_data)

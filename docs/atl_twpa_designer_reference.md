@@ -141,15 +141,17 @@ All formats are automatically converted to numpy arrays internally for calculati
 results = designer.run_design(
     interactive=True,      # bool: Pause at each plot for user input
     save_results=False,    # bool: Export parameters and save plot data at end
-    save_plots=False       # bool: Save phase matching plot as SVG
+    save_plots=False,      # bool: Save phase matching plot as SVG
+    output_dir=None        # str: Output directory (None uses package's designs/ folder)
 )
 ```
 Runs the complete TWPA design workflow. Returns comprehensive results dictionary.
 
 **Parameters:**
 - `interactive` (bool): If True, pause at each plot for user input. If False, run without stopping
-- `save_results` (bool): If True, exports both design parameters (.py file) and plot data (.npz file) to designs/ folder
-- `save_plots` (bool): If True, saves the phase matching plot as SVG to designs/ folder
+- `save_results` (bool): If True, exports both design parameters (.py file) and plot data (.npz file)
+- `save_plots` (bool): If True, saves the phase matching plot as SVG
+- `output_dir` (str or Path, optional): Custom output directory. If None, uses package's designs/ folder
 
 **Automatic Saving:** When `save_results=True`, both `export_parameters()` and `save_data()` are called automatically.
 
@@ -205,9 +207,13 @@ For periodic structures, plots the spatial modulation profile with windowing.
 
 ### export_parameters
 ```python
-filename = designer.export_parameters(filename=None)
+filename = designer.export_parameters(filename=None, output_dir=None)
 ```
-Exports all design parameters to a Python file in designs/ folder.
+Exports all design parameters to a Python file.
+
+**Parameters:**
+- `filename` (str, optional): Custom filename. If None, auto-generates based on device_name
+- `output_dir` (str or Path, optional): Output directory. If None, uses package's designs/ folder
 
 ### get_results
 ```python
@@ -245,12 +251,13 @@ Prints formatted summary of all parameters.
 
 ### save_data
 ```python
-filename = designer.save_data(filename=None)
+filename = designer.save_data(filename=None, output_dir=None)
 ```
-Saves all data needed to regenerate linear response and phase matching plots to a compressed NumPy (.npz) file in the designs/ folder. 
+Saves all data needed to regenerate linear response and phase matching plots to a compressed NumPy (.npz) file.
 
 **Parameters:**
 - `filename` (str, optional): Output filename. If None, auto-generates based on device_name
+- `output_dir` (str or Path, optional): Output directory. If None, uses package's designs/ folder
 
 **Returns:**
 - `str`: Path to saved .npz file
@@ -525,6 +532,41 @@ if np.any(bw_mask):
     bw_freqs = pump_freqs[bw_mask]
     bandwidth = bw_freqs[-1] - bw_freqs[0]
     print(f"Phase-matching bandwidth: {bandwidth:.2f} GHz")
+```
+
+### Example 7: Using Custom Output Directory (Workspace)
+```python
+import os
+from twpa_design.atl_twpa_designer import ATLTWPADesigner
+
+# Get current script directory for workspace
+workspace_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Design TWPA
+designer = ATLTWPADesigner(
+    custom_params={
+        'device_name': 'my_custom_jtwpa',
+        'f_zeros_GHz': 9,
+        'f_poles_GHz': 8.85,
+        'Ic_JJ_uA': 5,
+        'Ia0_uA': 3,
+        'Ntot_cell': 2000
+    },
+    verbose=True
+)
+
+# Run design and save to workspace folder instead of package folder
+results = designer.run_design(
+    interactive=True,
+    save_results=True,
+    save_plots=True,
+    output_dir=workspace_dir  # Saves to your workspace!
+)
+
+# Or manually control saving
+results = designer.run_design(interactive=True, save_results=False)
+designer.export_parameters(output_dir=workspace_dir)
+designer.save_data(output_dir=workspace_dir)
 ```
 
 

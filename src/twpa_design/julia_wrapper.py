@@ -115,21 +115,44 @@ class TWPASimulationConfig:
     
     # Harmonic balance settings
     Npumpharmonics: int = 20
-    Nmodulationharmonics: int = 10
-    
+    Nmodulationharmonics: Optional[int] = None  # Auto-set based on solver_mode if None
+
     # Additional solver settings
-    enable_three_wave_mixing: bool = False  # Default: disabled
-    enable_four_wave_mixing: bool = True   # Default: enabled (standard TWPA operation)
-    
+    enable_three_wave_mixing: Optional[bool] = None  # Auto-set based on solver_mode if None
+    enable_four_wave_mixing: Optional[bool] = None   # Auto-set based on solver_mode if None
+
+    # Solver mode selection
+    solver_mode: str = "nonlinear"  # "nonlinear" (hbsolve) or "linear" (hblinsolve)
+
     # Numerical solver parameters (with JosephsonCircuits.jl defaults)
     iterations: Optional[int] = None  # Default: 1000
     ftol: Optional[float] = None  # Default: 1e-8
     switchofflinesearchtol: Optional[float] = None  # Default: 1e-5
     alphamin: Optional[float] = None  # Default: 1e-4
-    sorting: str = "name"  # Default in hbsolve is "number", but we use "name" for consistency    
-    
+    sorting: str = "name"  # Default in hbsolve is "number", but we use "name" for consistency
+
     def __post_init__(self):
-        """Validate and compute DC bias after initialization"""
+        """Validate and apply mode-specific defaults"""
+        # Validate solver_mode
+        if self.solver_mode not in ["nonlinear", "linear"]:
+            raise ValueError(f"solver_mode must be 'nonlinear' or 'linear', got '{self.solver_mode}'")
+
+        # Apply mode-specific defaults (only if user didn't specify)
+        if self.solver_mode == "linear":
+            # Linear mode defaults
+            if self.Nmodulationharmonics is None:
+                self.Nmodulationharmonics = 0  # Just DC + fundamental
+            # Leave enable_three_wave_mixing and enable_four_wave_mixing as None
+            # to use Julia's defaults (threewavemixing=false, fourwavemixing=true)
+        else:  # nonlinear mode
+            # Nonlinear mode defaults
+            if self.Nmodulationharmonics is None:
+                self.Nmodulationharmonics = 10  # Standard for nonlinear
+            if self.enable_three_wave_mixing is None:
+                self.enable_three_wave_mixing = False  # Default: disabled
+            if self.enable_four_wave_mixing is None:
+                self.enable_four_wave_mixing = True   # Default: enabled
+
         if self.enable_dc_bias:
             self._compute_dc_bias()
     
@@ -319,7 +342,31 @@ def build_hbsolve_string(config: TWPASimulationConfig) -> str:
         cmd += ", " + ", ".join(option_strings)
     
     cmd += ")"
-    
+
+    return cmd
+
+
+def build_hblinsolve_string(config: TWPASimulationConfig) -> str:
+    """Build the hblinsolve command string for linear analysis
+
+    hblinsolve defaults: threewavemixing=false, fourwavemixing=true
+    Only add parameters when user explicitly sets them and they differ from defaults.
+    """
+
+    cmd = "sol = hblinsolve(ws, circuit, circuitdefs"
+    cmd += ", Nmodulationharmonics=Nmodulationharmonics"
+
+    # Only add threewavemixing if explicitly set to True (default is False)
+    if config.enable_three_wave_mixing is not None and config.enable_three_wave_mixing:
+        cmd += ", threewavemixing=true"
+
+    # Only add fourwavemixing if explicitly set to False (default is True)
+    if config.enable_four_wave_mixing is not None and not config.enable_four_wave_mixing:
+        cmd += ", fourwavemixing=false"
+
+    cmd += f", sorting={config.get_solver_options()['sorting']}"
+    cmd += ", returnS=true"
+    cmd += ")"
     return cmd
 
 
@@ -340,35 +387,41 @@ class TWPAResults:
     config: Optional[TWPASimulationConfig] = None
 
     
-    def save(self, filename: Optional[str] = None, 
+    def save(self, filename: Optional[str] = None,
                 metadata: Optional[dict] = None,
                 config: Optional[TWPASimulationConfig] = None,
-                use_filecounter: bool = True) -> str:
+                use_filecounter: bool = True,
+                output_dir: Optional[str] = None) -> str:
         """Save results to file with flexible naming options
-        
+
         Args:
             filename: Explicit filename. If None, auto-generates from config
             metadata: Custom metadata dict. If None and config provided, generates from config
             config: Simulation configuration (used for auto-naming and metadata)
             use_filecounter: If True and filename is None, uses filecounter for auto-naming
-            
+            output_dir: Output directory. If None, uses package's results/ folder
+
         Returns:
             str: The actual filename where results were saved
-            
+
         Examples:
             # Auto-name with filecounter
             results.save(config=sim_config)
-            
+
             # Explicit filename
             results.save("my_results.npz")
-            
+
             # Auto-name without filecounter
             results.save(config=sim_config, use_filecounter=False)
+
+            # Save to custom directory
+            results.save(config=sim_config, output_dir="/path/to/workspace")
         """
+        from pathlib import Path
 
         # Use provided config or fall back to stored config
         config_to_use = config or self.config
-        
+
         # Determine filename
         if filename is None:
             # Auto-generate filename
@@ -376,12 +429,17 @@ class TWPAResults:
                 raise ValueError("No config available for auto-naming. Provide filename or config.")
             if not self.netlist_name:
                 raise ValueError("No netlist_name available for auto-naming")
-                
-            results_dir = str(RESULTS_DIR)            
-            
+
+            # Use custom output_dir or default RESULTS_DIR
+            if output_dir is None:
+                results_dir = str(RESULTS_DIR)
+            else:
+                results_dir = str(Path(output_dir))
+                Path(results_dir).mkdir(parents=True, exist_ok=True)
+
             # At this point, config_to_use is guaranteed to be not None
             assert config_to_use is not None  # Help Pylance understand
-            
+
             if use_filecounter:
                 # Create pattern with wildcard
                 filename_pattern = f"{results_dir}/{self.netlist_name}_pump{config_to_use.pump_freq_GHz:.2f}GHz_*.npz"
@@ -500,12 +558,13 @@ class TWPAResults:
 
     def plot(self, config: Optional[TWPASimulationConfig] = None,  # Make optional
          netlist_name: Optional[str] = None,
-         save_path: Optional[str] = None, 
+         save_path: Optional[str] = None,
          auto_save: bool = False,  # Change default to False
          show_plot: bool = True,
-         max_mode_order_to_plot: int = 2) -> Figure:
+         max_mode_order_to_plot: int = 2,
+         output_dir: Optional[str] = None) -> Figure:
         """Plot TWPA simulation results in a 4x1 layout
-        
+
         Args:
             config: Simulation configuration. If None, uses stored config from results
             netlist_name: Name of the netlist (for filename generation when saving)
@@ -513,7 +572,8 @@ class TWPAResults:
             auto_save: If True and save_path is None, automatically saves with incremented filename
             show_plot: Whether to display the plot (default: True)
             max_mode_order_to_plot: Maximum mode order to plot for idlers (default: 2)
-            
+            output_dir: Output directory for saved plots. If None, uses package's results/ folder
+
         Returns:
             matplotlib.figure.Figure: The created figure
         """
@@ -551,35 +611,50 @@ class TWPAResults:
         print(f"=== Plotting Amplifier Performance ===")
         print(f"Amplifier type: {amp_type}")
         print(f"Gain parameter: {gain_param}")
-        
-        # Check commutation errors
-        cm_errors = np.abs(self.commutation_error)
-        print(f"Commutation relation |1-CM|:")
-        print(f"  Min: {np.min(cm_errors):.2e}")
-        print(f"  Max: {np.max(cm_errors):.2e}")
-        print(f"  Mean: {np.mean(cm_errors):.2e}")
-        if np.max(cm_errors) > 0.01:
-            print("  ⚠️ Warning: Maximum error > 1% - check energy conservation")
-        
-        # Create figure with 4x1 layout
-        fig = plt.figure(figsize=(8.6/2.54, 7))
-        gs = gridspec.GridSpec(4, 1, figure=fig, height_ratios=[2, 1, 1, 1], hspace=0.5)
-        ax1 = fig.add_subplot(gs[0])
-        ax2 = fig.add_subplot(gs[1])
-        ax3 = fig.add_subplot(gs[2])
-        ax4 = fig.add_subplot(gs[3])
-        
-        # Plot 1: S-parameters
-        self._plot_s_parameters(ax1, config_to_use)
-        
-        # Plot 2: Forward idlers
-        self._plot_forward_idlers(ax2, config_to_use, max_mode_order_to_plot)
-        
-        # Plot 3: Backward idlers
-        self._plot_backward_idlers(ax3, config_to_use, max_mode_order_to_plot)
-        
-        # Plot 4: Quantum efficiency
-        self._plot_quantum_efficiency(ax4, config_to_use)
+
+        # Check if linear mode - only plot S-parameters
+        is_linear_mode = (config_to_use.solver_mode == "linear" and
+                         config_to_use.Nmodulationharmonics == 0)
+
+        if not is_linear_mode:
+            # Check commutation errors (only for nonlinear mode)
+            cm_errors = np.abs(self.commutation_error)
+            print(f"Commutation relation |1-CM|:")
+            print(f"  Min: {np.min(cm_errors):.2e}")
+            print(f"  Max: {np.max(cm_errors):.2e}")
+            print(f"  Mean: {np.mean(cm_errors):.2e}")
+            if np.max(cm_errors) > 0.01:
+                print("  ⚠️ Warning: Maximum error > 1% - check energy conservation")
+
+        # Create figure layout based on mode
+        if is_linear_mode:
+            # Linear mode: only S-parameters plot
+            print("Linear mode: Plotting S-parameters only")
+            fig = plt.figure(figsize=(8.6/2.54, 3.5))
+            ax1 = fig.add_subplot(1, 1, 1)
+
+            # Plot S-parameters
+            self._plot_s_parameters(ax1, config_to_use)
+        else:
+            # Nonlinear mode: full 4-panel plot
+            fig = plt.figure(figsize=(8.6/2.54, 7))
+            gs = gridspec.GridSpec(4, 1, figure=fig, height_ratios=[2, 1, 1, 1], hspace=0.5)
+            ax1 = fig.add_subplot(gs[0])
+            ax2 = fig.add_subplot(gs[1])
+            ax3 = fig.add_subplot(gs[2])
+            ax4 = fig.add_subplot(gs[3])
+
+            # Plot 1: S-parameters
+            self._plot_s_parameters(ax1, config_to_use)
+
+            # Plot 2: Forward idlers
+            self._plot_forward_idlers(ax2, config_to_use, max_mode_order_to_plot)
+
+            # Plot 3: Backward idlers
+            self._plot_backward_idlers(ax3, config_to_use, max_mode_order_to_plot)
+
+            # Plot 4: Quantum efficiency
+            self._plot_quantum_efficiency(ax4, config_to_use)
         
         # Handle saving
         if save_path:
@@ -589,10 +664,16 @@ class TWPAResults:
         elif auto_save:
             # Determine which netlist name to use
             name_to_use = netlist_name if netlist_name else self.netlist_name
-            
+
             if name_to_use:
-                results_dir = str(RESULTS_DIR)                
-                
+                # Use custom output_dir or default RESULTS_DIR
+                from pathlib import Path
+                if output_dir is None:
+                    results_dir = str(RESULTS_DIR)
+                else:
+                    results_dir = str(Path(output_dir))
+                    Path(results_dir).mkdir(parents=True, exist_ok=True)
+
                 # Create filename pattern with wildcard for counter
                 filename_pattern = f"{results_dir}/{name_to_use}_pump{config_to_use.pump_freq_GHz:.2f}GHz_*.svg"
                 
@@ -1381,52 +1462,65 @@ class TWPASimulator:
             freqs_Hz = config.frequency_array()
             freq_step_Hz = freqs_Hz[1] - freqs_Hz[0]
             self.jl.eval(f'ws = 2*pi*collect({freqs_Hz[0]}:{freq_step_Hz}:{freqs_Hz[-1]})')
-            
-            # Set pump parameters
-            self.jl.eval(f'wp = (2*pi*{config.pump_freq_GHz}*1e9,)')
-            
-            # Build sources array
-            sources_str = build_julia_sources_string(config)
-            self.jl.eval(sources_str)
-            
+
             # Set harmonic parameters
-            self.jl.eval(f'Npumpharmonics = ({config.Npumpharmonics},)')
             self.jl.eval(f'Nmodulationharmonics = ({config.Nmodulationharmonics},)')
-            
-            print("✓ Simulation parameters configured")
-            print(f"  Frequency points: {len(freqs_Hz)}")
-            print(f"  Frequency range: {freqs_Hz[0]/1e9:.1f} - {freqs_Hz[-1]/1e9:.1f} GHz")
-            
-            # Display source configuration
-            sources = config.get_sources()
-            print(f"\n  Source configuration:")
-            for source in sources:
-                mode_type = "DC" if source['mode'] == (0,) else f"Pump @ {config.pump_freq_GHz} GHz"
-                print(f"    {mode_type}: {source['current']*1e6:.1f} μA on port {source['port']}")
-            
-            # Display dielectric loss info
+
+            # Solver-specific setup
+            if config.solver_mode == "nonlinear":
+                # Set pump parameters
+                self.jl.eval(f'wp = (2*pi*{config.pump_freq_GHz}*1e9,)')
+
+                # Build sources array
+                sources_str = build_julia_sources_string(config)
+                self.jl.eval(sources_str)
+
+                # Set pump harmonics
+                self.jl.eval(f'Npumpharmonics = ({config.Npumpharmonics},)')
+
+                print("✓ Simulation parameters configured (nonlinear mode)")
+                print(f"  Frequency points: {len(freqs_Hz)}")
+                print(f"  Frequency range: {freqs_Hz[0]/1e9:.1f} - {freqs_Hz[-1]/1e9:.1f} GHz")
+
+                # Display source configuration
+                sources = config.get_sources()
+                print(f"\n  Source configuration:")
+                for source in sources:
+                    mode_type = "DC" if source['mode'] == (0,) else f"Pump @ {config.pump_freq_GHz} GHz"
+                    print(f"    {mode_type}: {source['current']*1e6:.1f} μA on port {source['port']}")
+
+                if config.enable_three_wave_mixing or config.enable_four_wave_mixing:
+                    print(f"  Nonlinear mixing enabled")
+
+            else:  # linear mode
+                print("✓ Simulation parameters configured (linear mode)")
+                print(f"  Frequency points: {len(freqs_Hz)}")
+                print(f"  Frequency range: {freqs_Hz[0]/1e9:.1f} - {freqs_Hz[-1]/1e9:.1f} GHz")
+                print(f"  Mode: Linear S-parameter analysis (no pump)")
+
+            # Display dielectric loss info (applies to both modes)
             if self.netlist_has_loss:
                 print(f"  Dielectric loss: tan δ = {self.netlist_loss_tangent}")
-            
-            if config.enable_three_wave_mixing or config.enable_four_wave_mixing:
-                print(f"  Nonlinear mixing enabled")
-            
+
             print("\nRunning harmonic balance solver...")
             print("⏱️  This may take several minutes for large circuits...")
 
             # Clear any previous warnings
             self.jl.eval("JosephsonCircuits.clear_warning_log()")
 
-            # Build and run the hbsolve command
-            hbsolve_cmd = build_hbsolve_string(config)
+            # Build and run the appropriate solver command
+            if config.solver_mode == "nonlinear":
+                solver_cmd = build_hbsolve_string(config)
+            else:
+                solver_cmd = build_hblinsolve_string(config)
 
             # Print start time
             import time
             start_time = time.time()
             print(f"Started at {time.strftime('%H:%M:%S')}")
-            
+
             # Run with Julia's @time macro - this will print timing info
-            self.jl.eval(f'@time {hbsolve_cmd}')
+            self.jl.eval(f'@time {solver_cmd}')
             
             # Print total elapsed time
             elapsed = time.time() - start_time
@@ -1467,15 +1561,20 @@ class TWPASimulator:
     def _extract_results(self, config: TWPASimulationConfig) -> TWPAResults:
         """Extract simulation results from Julia."""
         assert self.jl is not None, "Julia not initialized"
-        
+
         # Extract frequency array
         frequencies_GHz = np.array(self.jl.eval('ws./(2*pi*1e9)'))
-        
+
+        # Determine result path based on solver mode
+        # hbsolve returns HB(nonlinear, linearized) -> access via sol.linearized
+        # hblinsolve returns LinearizedHB directly -> access via sol
+        result_path = "sol" if config.solver_mode == "linear" else "sol.linearized"
+
         # Helper function to extract S-parameters
         def extract_s_param(out_port, out_mode, in_port, in_mode):
             assert self.jl is not None, "Failed to get Julia instance"
             return np.array(self.jl.eval(f'''
-            abs2.(sol.linearized.S(
+            abs2.({result_path}.S(
                 outputmode={out_mode},
                 outputport={out_port},
                 inputmode={in_mode},
@@ -1488,39 +1587,56 @@ class TWPASimulator:
         S12 = extract_s_param(config.signal_port, (0,), config.output_port, (0,))
         S11 = extract_s_param(config.signal_port, (0,), config.signal_port, (0,))
         S22 = extract_s_param(config.output_port, (0,), config.output_port, (0,))
-        
-        # Quantum efficiency
-        print("  Extracting quantum efficiency...")
-        QE = np.array(self.jl.eval(f'''
-        sol.linearized.QE((0,),{config.output_port},(0,),{config.signal_port},:)./
-        sol.linearized.QEideal((0,),{config.output_port},(0,),{config.signal_port},:)
-        '''))
-        
-        # Commutation relation error
-        print("  Extracting commutation relation error...")
-        CM_error = np.array(self.jl.eval(f'1 .- sol.linearized.CM((0,),{config.output_port},:)'))
-        
-        # Idler response
-        print("  Extracting idler response...")
-        try:
-            idler = np.array(self.jl.eval(f"abs2.(sol.linearized.S(:,{config.output_port},(0,),{config.signal_port},:)')"))
-        except:
-            print("    Warning: Could not extract full idler response, using simplified version")
-            idler = np.zeros_like(S21)
 
-        # Backward idler response
-        print("  Extracting backward idler response...")
-        try:
-            backward_idler = np.array(self.jl.eval(f"abs2.(sol.linearized.S(:,{config.signal_port},(0,),{config.output_port},:)')"))
-        except:
-            print("    Warning: Could not extract backward idler response")
+        # In linear mode, skip QE/CM/idler extraction (not computed)
+        if config.solver_mode == "linear" and config.Nmodulationharmonics == 0:
+            print("  Linear mode: Using placeholder values for QE, CM, and idlers")
+            QE = np.ones_like(S21)  # Placeholder
+            CM_error = np.zeros_like(S21)  # Placeholder
+            idler = np.zeros_like(S21)
             backward_idler = None
-        
-        # Get modes
-        try:
-            modes = list(self.jl.eval("sol.linearized.modes"))
-        except:
-            modes = None
+            modes = [(0,)]  # Only fundamental mode
+        else:
+            # Quantum efficiency
+            print("  Extracting quantum efficiency...")
+            try:
+                QE = np.array(self.jl.eval(f'''
+                {result_path}.QE((0,),{config.output_port},(0,),{config.signal_port},:)./
+                {result_path}.QEideal((0,),{config.output_port},(0,),{config.signal_port},:)
+                '''))
+            except:
+                print("    Warning: Could not extract QE")
+                QE = np.ones_like(S21)
+
+            # Commutation relation error
+            print("  Extracting commutation relation error...")
+            try:
+                CM_error = np.array(self.jl.eval(f'1 .- {result_path}.CM((0,),{config.output_port},:)'))
+            except:
+                print("    Warning: Could not extract CM")
+                CM_error = np.zeros_like(S21)
+
+            # Idler response
+            print("  Extracting idler response...")
+            try:
+                idler = np.array(self.jl.eval(f"abs2.({result_path}.S(:,{config.output_port},(0,),{config.signal_port},:)')"))
+            except:
+                print("    Warning: Could not extract full idler response, using simplified version")
+                idler = np.zeros_like(S21)
+
+            # Backward idler response
+            print("  Extracting backward idler response...")
+            try:
+                backward_idler = np.array(self.jl.eval(f"abs2.({result_path}.S(:,{config.signal_port},(0,),{config.output_port},:)')"))
+            except:
+                print("    Warning: Could not extract backward idler response")
+                backward_idler = None
+
+            # Get modes
+            try:
+                modes = list(self.jl.eval(f"{result_path}.modes"))
+            except:
+                modes = None
 
         return TWPAResults(
             frequencies_GHz=frequencies_GHz,
@@ -1565,17 +1681,18 @@ class TWPASimulator:
         print(f"   Max quantum efficiency: {np.max(results.quantum_efficiency):.3f}")
         print(f"   Min commutation error: {np.min(np.abs(results.commutation_error)):.2e}")   
 
-    def run_full_simulation(self, netlist_name: str, config: TWPASimulationConfig, 
+    def run_full_simulation(self, netlist_name: str, config: TWPASimulationConfig,
                            verbose: bool = True, force_julia_reinit: bool = False,
                            save_results: bool = True, show_plot: bool = True,
-                           max_mode_order_to_plot: int = 2) -> TWPAResults:
+                           max_mode_order_to_plot: int = 2,
+                           output_dir: Optional[str] = None) -> TWPAResults:
         """
         Complete TWPA simulation workflow in one method.
-        
-        This method combines setup_julia(), load_netlist(), build_circuit(), 
-        run_simulation(), and optionally saves both data and plots with comprehensive 
+
+        This method combines setup_julia(), load_netlist(), build_circuit(),
+        run_simulation(), and optionally saves both data and plots with comprehensive
         error handling and optional verbose output.
-        
+
         Args:
             netlist_name: Name of netlist file (without .py extension)
             config: Simulation configuration
@@ -1584,10 +1701,11 @@ class TWPASimulator:
             save_results: If True, automatically save both data (.npz) and plot (.svg) files
             show_plot: If True, display the plot (default: True)
             max_mode_order_to_plot: Maximum mode order to plot for idlers (default: 2)
-            
+            output_dir: Output directory for saved files. If None, uses package's results/ folder
+
         Returns:
             TWPAResults object containing simulation results
-            
+
         Raises:
             RuntimeError: If any step fails
             FileNotFoundError: If netlist file not found
@@ -1664,14 +1782,14 @@ class TWPASimulator:
             if save_results:
                 if verbose:
                     print(f"\n💾 Saving results...")
-                
+
                 # Save data (.npz file)
-                data_filename = results.save(config=config)
+                data_filename = results.save(config=config, output_dir=output_dir)
                 if verbose:
                     print(f"📊 Data saved to: {data_filename}")
-                
+
                 # Save plot (.svg file) and optionally display it
-                results.plot(config=config, netlist_name=netlist_name, auto_save=True, show_plot=show_plot, max_mode_order_to_plot=max_mode_order_to_plot)
+                results.plot(config=config, netlist_name=netlist_name, auto_save=True, show_plot=show_plot, max_mode_order_to_plot=max_mode_order_to_plot, output_dir=output_dir)
                 if verbose:
                     if show_plot:
                         print(f"📈 Plot saved and displayed")

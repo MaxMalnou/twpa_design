@@ -1944,20 +1944,31 @@ class ATLTWPADesigner:
             'characteristics': characteristics
         }
 
-    def export_parameters(self, filename=None):
-        """Export parameters to Python file."""
+    def export_parameters(self, filename=None, output_dir=None):
+        """Export parameters to Python file.
+
+        Parameters
+        ----------
+        filename : str, optional
+            Output filename. If None, auto-generates based on device_name
+        output_dir : str or Path, optional
+            Output directory. If None, uses package's designs/ folder
+        """
         import os
         from datetime import datetime
         from pathlib import Path
         from twpa_design import DESIGNS_DIR
-        
+
         # Get all results using the get_results method
         results = self.get_results()
-        
+
         # Create designs folder path
-        designs_folder = DESIGNS_DIR
-        designs_folder.mkdir(exist_ok=True)
-        
+        if output_dir is None:
+            designs_folder = DESIGNS_DIR
+        else:
+            designs_folder = Path(output_dir)
+        designs_folder.mkdir(parents=True, exist_ok=True)
+
         # Auto-generate filename if not provided
         if filename is None:
             base_pattern = f'{self.device_name}_*.py'
@@ -2092,10 +2103,10 @@ class ATLTWPADesigner:
 
     ######################################################################################## 
 
-    def run_design(self, interactive=True, save_results=False, save_plots=False):
+    def run_design(self, interactive=True, save_results=False, save_plots=False, output_dir=None):
         """
         Run the complete TWPA design workflow.
-    
+
         Parameters
         ----------
         interactive : bool
@@ -2104,8 +2115,10 @@ class ATLTWPADesigner:
         save_results : bool
             If True, export parameters at the end
         save_plots : bool
-            If True, save phase matching plot to designs/ folder as SVG
-            
+            If True, save phase matching plot as SVG
+        output_dir : str or Path, optional
+            Output directory for saved files. If None, uses package's designs/ folder
+
         Returns
         -------
         dict
@@ -2151,11 +2164,11 @@ class ATLTWPADesigner:
         # Save if requested
         if save_results:
             # Save design parameters (.py file)
-            design_filename = self.export_parameters()
+            design_filename = self.export_parameters(output_dir=output_dir)
             print(f"\n✓ Design parameters saved to: {design_filename}")
-            
+
             # Save data for plot regeneration (.npz file)
-            data_filename = self.save_data()
+            data_filename = self.save_data(output_dir=output_dir)
             print(f"✓ Plot data saved to: {data_filename}")
         
         # Return the comprehensive results
@@ -2181,15 +2194,17 @@ class ATLTWPADesigner:
             'completed': hasattr(self, 'fa_GHz')
         }
     
-    def save_data(self, filename=None):
+    def save_data(self, filename=None, output_dir=None):
         """
         Save all data needed to regenerate linear response and phase matching plots.
-        
+
         Parameters
         ----------
         filename : str, optional
             Output filename. If None, auto-generates based on device_name
-            
+        output_dir : str or Path, optional
+            Output directory. If None, uses package's designs/ folder
+
         Returns
         -------
         str
@@ -2200,11 +2215,14 @@ class ATLTWPADesigner:
         from pathlib import Path
         from twpa_design import DESIGNS_DIR
         from twpa_design.helper_functions import filecounter
-        
+
         # Create designs folder path
-        designs_folder = DESIGNS_DIR
-        designs_folder.mkdir(exist_ok=True)
-        
+        if output_dir is None:
+            designs_folder = DESIGNS_DIR
+        else:
+            designs_folder = Path(output_dir)
+        designs_folder.mkdir(parents=True, exist_ok=True)
+
         # Auto-generate filename if not provided
         if filename is None:
             base_pattern = f'{self.device_name}_*.npz'
