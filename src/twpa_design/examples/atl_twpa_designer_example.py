@@ -188,7 +188,7 @@ DEVICE_CONFIGS = {
 }
 
 
-simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
+simulation_type = "b_jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
 
 # Get the config for the chosen device
 if simulation_type in DEVICE_CONFIGS:
@@ -205,4 +205,4 @@ designer = ATLTWPADesigner(
 # Run interactive design
 # save_results=True will export parameters to designs/ folder
 # save_plots=True will save the phase matching plot as SVG to designs/ folder
-results = designer.run_design(interactive=True, save_results=False, save_plots=False)
+results = designer.run_design(interactive=True, save_results=True, save_plots=True)

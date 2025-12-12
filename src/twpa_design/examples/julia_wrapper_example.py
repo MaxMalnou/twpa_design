@@ -112,7 +112,7 @@ SIMULATION_CONFIGS = {
     }
 }
 
-simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
+simulation_type = "b_jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
 
 # Get the config for the chosen simulation
 if simulation_type in SIMULATION_CONFIGS:
@@ -137,7 +137,7 @@ try:
         netlist_name=netlist_name,
         config=sim_config,        
         verbose=True,        # Set to False for minimal output
-        save_results=False,    # Automatically saves both data (.npz) and plot (.svg)
+        save_results=True,    # Automatically saves both data (.npz) and plot (.svg)
         max_mode_order_to_plot=4
     )
     

@@ -1,5 +1,5 @@
 # JC netlist for b_jtwpa
-# Generated: 2025-08-29 10:58:12
+# Generated: 2025-11-15 13:51:25
 # Components: 12004
 # Parameters: 11
 
@@ -12020,8 +12020,8 @@ circuit_parameters = {
     "R_port": 5.000000e+01,
     "c1": 4.000000e-01,
     "c2": 1.600000e-01,
-    "c3": 4.533333e-02,
-    "c4": 1.440000e-02,
+    "c3": -2.666667e-03,
+    "c4": -2.773333e-02,
 }
 
 metadata = {
@@ -12040,5 +12040,5 @@ metadata = {
     "jj_structure_type": "rf_squid",
     "component_count": 12004,
     "parameter_count": 11,
-    "generated": "2025-08-29 10:58:12",
+    "generated": "2025-11-15 13:51:25",
 }

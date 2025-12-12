@@ -490,12 +490,19 @@ class ATLTWPADesigner:
             self.c1_taylor = self.beta_L*np.sin(self.phi_dc)/(1+self.beta_L*np.cos(self.phi_dc))
             self.c2_taylor = self.beta_L*(np.cos(self.phi_dc) + self.beta_L*(1+np.sin(self.phi_dc)**2))/(2*(1+self.beta_L*np.cos(self.phi_dc)))
             # Complete Taylor coefficients for rf-squid
-            denominator_cubed = (1 + self.beta_L * np.cos(self.phi_dc))**3
-            self.c3_taylor = (self.beta_L * np.sin(self.phi_dc) * 
-                            (3*self.beta_L*np.cos(self.phi_dc) - 2*self.beta_L**2*np.sin(self.phi_dc)**2 + 1)) / (6 * denominator_cubed)
-            self.c4_taylor = (self.beta_L * (np.cos(self.phi_dc) + 
-                            self.beta_L*(1 + np.sin(self.phi_dc)**2 + self.beta_L*np.cos(self.phi_dc)*(2 - 3*np.sin(self.phi_dc)**2)) + 
-                            self.beta_L**3*np.sin(self.phi_dc)**4)) / (24 * (1 + self.beta_L * np.cos(self.phi_dc))**4)
+            denominator = (1 + self.beta_L * np.cos(self.phi_dc))**3
+            
+            self.c3_taylor = self.beta_L * np.sin(self.phi_dc) * (
+                            6*self.beta_L**2*np.sin(self.phi_dc)**2 + 5*self.beta_L**2*np.cos(self.phi_dc)**2 + 4*self.beta_L*np.cos(self.phi_dc)-1) / (
+                            6 * denominator)
+            
+            denominator = (1 + self.beta_L * np.cos(self.phi_dc))**4
+
+            self.c4_taylor = self.beta_L * (-np.cos(self.phi_dc) + 3*self.beta_L*np.cos(self.phi_dc)**2 + 9*self.beta_L**2*np.cos(self.phi_dc)**3
+                                             + 5*self.beta_L**3*np.cos(self.phi_dc)**4 - 8*self.beta_L*np.sin(self.phi_dc)**2 
+                                             + 20*self.beta_L**2*np.cos(self.phi_dc)*np.sin(self.phi_dc)**2 
+                                             + 28*self.beta_L**3*np.cos(self.phi_dc)**2*np.sin(self.phi_dc)**2 + 24*self.beta_L**3*np.sin(self.phi_dc)**4
+                                            ) / (24 * denominator)
             
         if self.verbose:
             print("Taylor expansion of L(φ) at the dc operating point:")

@@ -1,5 +1,5 @@
 # Auto-generated TWPA design parameters
-# Generated on: 2025-08-29 10:58:01
+# Generated on: 2025-11-15 13:50:04
 # Device: b_jtwpa
 # Nonlinearity: JJ
 # Dispersion type: filter
@@ -59,8 +59,8 @@ circuit = {
     'xi_perA2': 9600000000.0,
     'c1_taylor': 0.4,
     'c2_taylor': 0.16000000000000003,
-    'c3_taylor': 0.04533333333333333,
-    'c4_taylor': 0.014400000000000005,
+    'c3_taylor': -0.002666666666666647,
+    'c4_taylor': -0.027733333333333332,
     'n_zeros': 1,
     'n_poles': 0,
     'LinfLF1_H': [2.344573739992464e-10],
