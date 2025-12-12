@@ -512,7 +512,20 @@ def save_filter_array_intelligently(arr):
     
     return FilterArray(arr)
 
-def should_have_zero_at_zero(w_zeros, w_poles, zero_at_zero=True): # make sure that the alternance of zeros and poles is correct
+def should_have_zero_at_zero(w_zeros, w_poles, zero_at_zero=True):
+    """Determine if the filter should have a zero at DC (low-pass) or a pole at DC (high-pass).
+
+    When finite poles/zeros exist, the value is auto-determined by the alternation rule.
+    When both w_zeros and w_poles are empty, the user's choice (zero_at_zero) is respected.
+
+    Args:
+        w_zeros: Array of zero frequencies
+        w_poles: Array of pole frequencies
+        zero_at_zero: User preference for pure LP/HP filters (True=low-pass, False=high-pass)
+
+    Returns:
+        bool: True for zero at DC (low-pass), False for pole at DC (high-pass)
+    """
     if w_zeros.size > 0 and w_poles.size > 0:
         if np.min(w_poles) < np.min(w_zeros): # means that there must be a zero at zero since the lowest pole is lower than the lowest zero
             zero_at_zero = True

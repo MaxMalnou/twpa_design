@@ -44,6 +44,9 @@ Filter parameters
 -----------------
 'f_zeros_GHz': position of the ATL filter zeros. default: []. Can be a number (9), list ([9, 8.5]), or empty list ([]).
 'f_poles_GHz': position of the ATL filter poles. default: []. Can be a number (8.85), list ([8.85, 9.2]), or empty list ([]).
+'zero_at_zero': True for low-pass (zero at DC), False for high-pass (pole at DC). default: True.
+               Only affects pure LP/HP filters when both f_zeros_GHz and f_poles_GHz are empty.
+               When finite poles/zeros exist, this is auto-determined by the alternation rule.
 
 
 'fc_filter_GHz': normalizing frequency of the filer. default: 500. If fc_filter_GHz > fcmax_GHz
@@ -122,6 +125,7 @@ DEFAULT_CONFIG = {
     # Filter parameters
     'f_zeros_GHz': [],
     'f_poles_GHz': [],
+    'zero_at_zero': True,  # True for low-pass, False for high-pass (only affects pure LP/HP with no finite poles/zeros)
     'fc_filter_GHz': 500,
     'fc_TLsec_GHz': 500,
     'Foster_form_L': 1,
@@ -179,6 +183,7 @@ class ATLTWPADesigner:
     fmax_GHz: float
     f_zeros_GHz: npt.NDArray[np.float64]
     f_poles_GHz: npt.NDArray[np.float64]
+    zero_at_zero: bool
     fc_filter_GHz: float
     fc_TLsec_GHz: float
     Foster_form_L: int
@@ -541,7 +546,7 @@ class ATLTWPADesigner:
             print("\n=== Calculating Derived Quantities ===")
             
         if self.dispersion_type == 'filter' or self.dispersion_type == 'both':
-            self.zero_at_zero = should_have_zero_at_zero(self.f_zeros_GHz, self.f_poles_GHz)
+            self.zero_at_zero = should_have_zero_at_zero(self.f_zeros_GHz, self.f_poles_GHz, self.zero_at_zero)
             
             # Handle fc_TLsec_GHz default
             if not hasattr(self, 'fc_TLsec_GHz'):

@@ -48,6 +48,8 @@ designer = ATLTWPADesigner(
 # If both specified -> 'both'
 'f_zeros_GHz': []                    # list/number: Filter zero frequencies
 'f_poles_GHz': []                    # list/number: Filter pole frequencies
+'zero_at_zero': True                 # bool: True for low-pass (zero at DC), False for high-pass (pole at DC)
+                                     # Only affects pure LP/HP filters when both f_zeros_GHz and f_poles_GHz are empty
 'fc_filter_GHz': 500                 # float: Filter cutoff frequency
 'fc_TLsec_GHz': 500                  # float: TL section cutoff frequency
 'Foster_form_L': 1                   # int: Foster form for L filter (1 or 2)
