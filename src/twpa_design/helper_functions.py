@@ -1053,7 +1053,15 @@ def filter_design_C(g_C, w_poles, w_zeros, Z0_TWPA_ohm, fc_filter_GHz, zero_at_z
         return L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F
     
 
-def Z_Foster_form_L(L0_H,n_jj_struct,CJ_F, C0LF1_F, LiLF1_H, CiLF1_F, LinfLF1_rem_H,w,n_poles,LinfLF1_H,nonlinearity='JJ'):  
+def Z_Foster_form_L(L0_H,n_jj_struct,CJ_F, C0LF1_F, LiLF1_H, CiLF1_F, LinfLF1_rem_H,w,n_poles,LinfLF1_H,nonlinearity='JJ'):
+
+    # Handle w=0 (DC): capacitors are open circuit (Z=inf), inductors are short circuit (Z=0)
+    if w == 0:
+        # At DC, if there's a capacitor C0 in series, impedance is infinite
+        if C0LF1_F != np.inf and C0LF1_F != 0:
+            return np.inf
+        # Otherwise, inductors are short circuits, so Z=0
+        return 0.0
 
     if C0LF1_F != np.inf: # python does not handle 1/(a+inf) well
         if nonlinearity == 'JJ':
@@ -1084,7 +1092,15 @@ def Z_Foster_form_L(L0_H,n_jj_struct,CJ_F, C0LF1_F, LiLF1_H, CiLF1_F, LinfLF1_re
     return  Z_filter_L
 
 def Y_Foster_form_L(L0LF2_H, CinfLF2_F, LiLF2_H, CiLF2_F,w,n_zeros):
-   
+
+    # Handle w=0 (DC): inductor admittance 1/(jwL) diverges, capacitor admittance jwC=0
+    if w == 0:
+        # At DC, if there's an inductor L0 in shunt, admittance is infinite
+        if L0LF2_H != np.inf and L0LF2_H != 0:
+            return np.inf, np.inf
+        # Otherwise, capacitors have zero admittance at DC
+        return 0.0, 0.0
+
     if L0LF2_H != np.inf:
         Y_filter_L = 1j*w*CinfLF2_F + 1/(1j*w*L0LF2_H)                
     else:
@@ -1101,7 +1117,15 @@ def Y_Foster_form_L(L0LF2_H, CinfLF2_F, LiLF2_H, CiLF2_F,w,n_zeros):
 
     return Y_filter_L, Y_trunkfilter_L
 
-def Z_Foster_form_C(LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,w,n_zeros):    
+def Z_Foster_form_C(LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,w,n_zeros):
+
+    # Handle w=0 (DC): capacitors are open circuit (Z=inf), inductors are short circuit (Z=0)
+    if w == 0:
+        # At DC, if there's a capacitor C0 in series, impedance is infinite
+        if C0CF1_F != np.inf and C0CF1_F != 0:
+            return np.inf
+        # Otherwise, inductors are short circuits, so Z=0
+        return 0.0
 
     if C0CF1_F != np.inf:
         Z_filter_C = 1j*w*LinfCF1_H + 1/(1j*w*C0CF1_F)
@@ -1120,6 +1144,14 @@ def Z_Foster_form_C(LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,w,n_zeros):
     return Z_filter_C
 
 def Y_Foster_form_C(L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F,w,n_poles):
+
+    # Handle w=0 (DC): inductor admittance 1/(jwL) diverges, capacitor admittance jwC=0
+    if w == 0:
+        # At DC, if there's an inductor L0 in shunt, admittance is infinite
+        if L0CF2_H != np.inf and L0CF2_H != 0:
+            return np.inf
+        # Otherwise, capacitors have zero admittance at DC
+        return 0.0
 
     if L0CF2_H != np.inf:
         Y_filter_C = 1/(1j*w*L0CF2_H) + 1j*w*CinfCF2_F
