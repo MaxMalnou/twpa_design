@@ -795,8 +795,13 @@ class JCNetlistBuilder:
         
         # For windowed cells, write value directly inline
         if is_windowed and 'TLsec' in component_name:
-            # Write numeric value directly
-            self.components.append(JCComponent(c_name, str(node1), str(node2), f"{cap_value:.6e}"))
+            # Write numeric value directly, with dielectric loss if enabled
+            enable_loss = self.workspace_data.get('enable_dielectric_loss', False)
+            loss_tan = self.workspace_data.get('loss_tangent', 0.0)
+            if enable_loss and loss_tan > 0:
+                self.components.append(JCComponent(c_name, str(node1), str(node2), f"{cap_value:.6e}/(1+{loss_tan:.6e}im)"))
+            else:
+                self.components.append(JCComponent(c_name, str(node1), str(node2), f"{cap_value:.6e}"))
         else:
             # Use symbolic value as before
             c_symbol = self.create_symbolic_value(cap_value, 'C', component_name, 
@@ -1862,7 +1867,8 @@ def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: 
         f.write("circuit_parameters = {\n")
         for param, value in sorted(circuit_parameters.items()):
             # Check if this is a capacitor parameter and loss is enabled
-            if (param.startswith('C') and param not in ['c1', 'c2', 'c3', 'c4'] and 
+            # Exclude Cj (junction capacitance) since it's not a dielectric capacitor
+            if (param.startswith('C') and param not in ['c1', 'c2', 'c3', 'c4', 'Cj'] and
                 metadata.get('dielectric_loss_enabled', False)):
                 # Write as complex value in Julia-compatible format
                 loss_tan = metadata.get('loss_tangent', 0.0)

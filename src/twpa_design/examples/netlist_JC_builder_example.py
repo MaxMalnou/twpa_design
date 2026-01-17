@@ -50,7 +50,7 @@ NETLIST_CONFIGS = {
     }
 }
 
-simulation_type = "b_jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
+simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
 
 # Get the config for the chosen netlist
 if simulation_type in NETLIST_CONFIGS:

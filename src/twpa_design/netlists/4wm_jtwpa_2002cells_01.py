@@ -1,5 +1,5 @@
 # JC netlist for 4wm_jtwpa
-# Generated: 2025-09-10 09:34:23
+# Generated: 2026-01-17 14:29:08
 # Components: 6374
 # Parameters: 7
 
@@ -6384,7 +6384,7 @@ circuit_parameters = {
     "C0CF1": "2.722853e-14/(1+2.000000e-04im)",
     "C_TL_1": "2.632848e-14/(1+2.000000e-04im)",
     "CiCF1_1": "7.964918e-13/(1+2.000000e-04im)",
-    "Cj": "2.405218e-13/(1+2.000000e-04im)",
+    "Cj": 2.405218e-13,
     "LiCF1_1": 3.926214e-10,
     "Lj": 6.582120e-11,
     "R_port": 5.000000e+01,
@@ -6407,5 +6407,5 @@ metadata = {
     "jj_structure_type": "jj",
     "component_count": 6374,
     "parameter_count": 7,
-    "generated": "2025-09-10 09:34:23",
+    "generated": "2026-01-17 14:29:08",
 }

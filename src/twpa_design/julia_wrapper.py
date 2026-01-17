@@ -1306,6 +1306,10 @@ class TWPASimulator:
                 return str(param_value)
         elif value in ['1', '2']:  # Port numbers
             return value
+        elif isinstance(value, str) and ('im' in value or 'im)' in value):
+            # Inline complex value or expression (e.g., "1.38e-12/(1+2e-4im)")
+            # Return as-is for Julia to evaluate
+            return value
         else:
             try:
                 float_val = float(value)

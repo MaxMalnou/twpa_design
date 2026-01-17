@@ -112,7 +112,7 @@ SIMULATION_CONFIGS = {
     }
 }
 
-simulation_type = "b_jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
+simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
 
 # Get the config for the chosen simulation
 if simulation_type in SIMULATION_CONFIGS:

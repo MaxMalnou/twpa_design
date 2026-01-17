@@ -42,7 +42,7 @@ config = NetlistConfig(
   - `False`: Use JosephsonCircuits.jl hardcoded JJ potential (more accurate)
   - `True`: Use Taylor expansion with c1, c2, c3, c4 coefficients
   - Note: KI devices always use Taylor expansion regardless of this setting
-- **enable_dielectric_loss**: Add loss to all capacitors as complex admittance
+- **enable_dielectric_loss**: Add loss to dielectric capacitors as complex admittance (excludes junction capacitance Cj)
 - **loss_tangent**: Dielectric loss tangent tan(δ), typical values 1e-4 to 1e-3
 - **use_linear_in_window**: In windowed periodic structures, use linear L in apodization regions
 - **Ntot_cell_override**: Force different number of cells than design specifies
