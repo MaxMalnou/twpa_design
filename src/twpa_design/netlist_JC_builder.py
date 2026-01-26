@@ -947,7 +947,7 @@ class JCNetlistBuilder:
         
         # Handle LinfCF1
         if check_flat(LinfCF1_H, k_idx) != 0:
-            if check_flat(C0CF1_F, k_idx) != np.inf or CiCF1_F[k_idx, n_zeros-1] != np.inf:
+            if check_flat(C0CF1_F, k_idx) != np.inf or (n_zeros > 0 and CiCF1_F[k_idx, n_zeros-1] != np.inf):
                 shunt_node = self.get_new_node()
                 l_name = self.make_unique_name(f'LinfCF1_{k}')
                 l_symbol = self.create_symbolic_value(check_flat(LinfCF1_H, k_idx), 'L', l_name, 
@@ -965,7 +965,7 @@ class JCNetlistBuilder:
         
         # Handle C0CF1
         if check_flat(C0CF1_F, k_idx) != np.inf:
-            if CiCF1_F[k_idx, n_zeros-1] != np.inf:
+            if n_zeros > 0 and CiCF1_F[k_idx, n_zeros-1] != np.inf:
                 next_shunt_node = self.get_new_node()
                 self.add_capacitor(f'0CF1_{k}', current_shunt_node, next_shunt_node, check_flat(C0CF1_F, k_idx), 
                                  Ncpersc_cell, False, ind_g_C_with_filters, dispersion_type)
@@ -996,7 +996,7 @@ class JCNetlistBuilder:
                 p += 1
         
         # Last shunt LC pair to ground
-        if CiCF1_F[k_idx, n_zeros-1] != np.inf:
+        if n_zeros > 0 and CiCF1_F[k_idx, n_zeros-1] != np.inf:
             l_name = self.make_unique_name(f'LiCF1_{p-1}_{k}')
             l_symbol = self.create_symbolic_value(LiCF1_H[k_idx, n_zeros-1], 'L', l_name, 
                                                  Ncpersc_cell, ind_g_C_with_filters, dispersion_type)
