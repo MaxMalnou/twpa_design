@@ -21,6 +21,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message="overflow enc
 np.seterr(divide='ignore', invalid='ignore')  # Suppress divide by zero and invalid value warnings
 
 from scipy.optimize import basinhopping, minimize
+from scipy.stats import qmc  # For Latin Hypercube Sampling in Hermitian solver
 
 
 ################################################################################################
@@ -90,6 +91,105 @@ def det_D(delta, ind_stopband, ind_param, w_tilde_stopband_edges, is_default_val
     
     return np.array(detD_delta)
 
+
+def det_D_hermitian(delta_cs, ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband):
+    """
+    Determinant function with Hermitian coupling matrix (allows phase in modulation).
+
+    The modulation is: g_C(x) = 1 + 2*sum_n [delta_c[n]*cos(n*x) + delta_s[n]*sin(n*x)]
+
+    This corresponds to complex Fourier coefficients:
+        epsilon_n = delta_c[n] - 1j*delta_s[n]
+        epsilon_{-n} = conj(epsilon_n) = delta_c[n] + 1j*delta_s[n]
+
+    The coupling matrix D is Hermitian: D[k, k+n] = conj(D[k+n, k])
+
+    Parameters:
+    delta_cs (array): Array of length 2*n_param, structured as [delta_c_1, delta_c_2, ..., delta_s_1, delta_s_2, ...]
+                      First half are cosine coefficients, second half are sine coefficients.
+    ind_stopband (array): Array of stopband indices
+    ind_param (array): Array of stopband indices for parameters (non-default values)
+    w_tilde_stopband_edges (array): Array of normalized frequencies at stopband edges
+    is_default_value (array): Boolean array indicating which edges are default values
+    max_ind_stopband (int): Maximum stopband index
+
+    Returns:
+    array: Determinant values at each stopband edge (real, since D is Hermitian)
+    """
+    n_param = len(ind_param)
+    delta_c = delta_cs[:n_param]  # cosine components
+    delta_s = delta_cs[n_param:]  # sine components
+
+    n_tot_stopband_edges = len(w_tilde_stopband_edges)
+    n_modes = 2 * max_ind_stopband + 1
+
+    # Define k at the band edge
+    k_norm = 0.5 * ind_stopband
+
+    # Create the mode indices
+    v_modes = np.arange(-np.floor(n_modes/2), np.floor(n_modes/2) + 1, dtype=int)
+
+    detD_delta = []
+
+    # loop over all stopband edges
+    for j in range(n_tot_stopband_edges):
+        # Create a complex matrix for Hermitian structure
+        D = np.zeros((n_modes, n_modes), dtype=complex)
+
+        # Fill diagonal terms (real)
+        for i in range(n_modes):
+            D[i, i] = (k_norm[j] + v_modes[i])**2 - w_tilde_stopband_edges[j]**2
+
+        # Skip default values
+        if not is_default_value[j]:
+            # Fill off-diagonal terms with Hermitian structure
+            for i in range(n_param):
+                sb_idx = ind_param[i]
+
+                # Complex coupling coefficient: epsilon_n = delta_c - 1j*delta_s
+                epsilon_n = (delta_c[i] - 1j*delta_s[i]) * w_tilde_stopband_edges[j]**2
+                epsilon_n_conj = (delta_c[i] + 1j*delta_s[i]) * w_tilde_stopband_edges[j]**2
+
+                for k in range(n_modes - sb_idx):
+                    D[k, k+sb_idx] -= epsilon_n        # upper off-diagonal
+                    D[k+sb_idx, k] -= epsilon_n_conj  # lower off-diagonal (conjugate)
+
+        # Calculate determinant - should be real for Hermitian matrix
+        det_val = np.linalg.det(D)
+        detD_delta.append(np.real(det_val))
+
+    return np.array(detD_delta)
+
+
+def evaluate_modulation(delta_c, delta_s, ind_param, n_points=1000):
+    """
+    Evaluate the modulation profile and compute peak deviation.
+
+    The modulation is: g_C(x) = 1 + 2*sum_n [delta_c[n]*cos(n*x) + delta_s[n]*sin(n*x)]
+
+    Parameters:
+    delta_c (array): Cosine coefficients for each harmonic
+    delta_s (array): Sine coefficients for each harmonic
+    ind_param (array): Harmonic indices corresponding to delta_c and delta_s
+    n_points (int): Number of points to evaluate
+
+    Returns:
+    tuple: (peak_deviation, g_min, g_max)
+           peak_deviation is max(g_C) - 1, or np.inf if g_C goes negative
+    """
+    x = np.linspace(0, 2*np.pi, n_points)
+    g_C = np.ones(n_points)
+
+    for i, idx in enumerate(ind_param):
+        g_C += 2 * (delta_c[i] * np.cos(idx * x) + delta_s[i] * np.sin(idx * x))
+
+    g_min = np.min(g_C)
+    g_max = np.max(g_C)
+
+    if g_min <= 0:
+        return np.inf, g_min, g_max  # infeasible - negative capacitance
+    else:
+        return g_max - 1, g_min, g_max  # peak positive deviation
 
 
 ################################################################################################
@@ -244,6 +344,133 @@ def find_all_solutions(ind_stopband, ind_param, w_tilde_stopband_edges, is_defau
     return unique_solutions
 
 
+def find_all_solutions_hermitian(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
+                                  bounds=(-0.5, 0.5), n_attempts=30, tolerance=1e-8, always_return_best=True, verbose=True):
+    """
+    Find multiple solutions to the determinant system using Hermitian coupling matrix.
+
+    This version optimizes 2*n_param parameters (delta_c and delta_s for each harmonic),
+    allowing phase freedom in the modulation.
+
+    Parameters:
+    ind_stopband (array): Array of stopband indices
+    ind_param (array): Array of stopband indices for parameters (non-default values)
+    w_tilde_stopband_edges (array): Array of normalized frequencies at stopband edges
+    is_default_value (array): Boolean array indicating which edges are default values
+    max_ind_stopband (int): Maximum stopband index
+    n_param (int): Number of harmonics (actual optimization has 2*n_param parameters)
+    bounds (tuple): Bounds for the solutions
+    n_attempts (int): Number of random starting points to try
+    tolerance (float): Tolerance for accepting solutions (lower = more precise)
+    always_return_best (bool): If True, always return the best solution found
+    verbose (bool): Whether to print progress messages
+
+    Returns:
+    list: List of all unique solutions found, each of shape (2*n_param,) as [delta_c..., delta_s...]
+    """
+    n_opt_param = 2 * n_param  # Optimize both cosine and sine components
+
+    # Define the objective function to minimize (sum of squared determinants)
+    def objective(delta_cs):
+        det_values = det_D_hermitian(delta_cs, ind_stopband, ind_param, w_tilde_stopband_edges,
+                                     is_default_value, max_ind_stopband)
+        return sum(d*d for d in det_values)
+
+    # List to store unique solutions
+    unique_solutions = []
+    solution_tolerance = tolerance
+    bounds_list = [(bounds[0], bounds[1]) for _ in range(n_opt_param)]
+
+    # Track the best solution found
+    best_solution = None
+    best_objective_value = float('inf')
+
+    if verbose:
+        print(f"Running {n_attempts} basin-hopping searches for {n_opt_param} parameters (Hermitian)...")
+        print(f"  ({n_param} cosine + {n_param} sine components)")
+        print(f"Using solution tolerance: {solution_tolerance}")
+
+    # Generate starting points using Latin Hypercube Sampling for better coverage
+    # LHS ensures each "slice" of each dimension is sampled exactly once
+    sampler = qmc.LatinHypercube(d=n_opt_param)
+    lhs_samples = sampler.random(n=n_attempts)
+    # Scale from [0,1] to [bounds[0], bounds[1]]
+    starting_points = qmc.scale(lhs_samples, bounds[0], bounds[1])
+
+    # Custom step-taking function
+    def take_bounded_step(x):
+        s = np.random.uniform(-0.1, 0.1, len(x))
+        new_x = x + s
+        new_x = np.clip(new_x, bounds[0], bounds[1])
+        return new_x
+
+    # Try each starting point
+    for i, x0 in enumerate(starting_points):
+        if verbose:
+            print(f"Starting point {i+1}/{len(starting_points)}")
+
+        minimizer_kwargs = {
+            "method": "L-BFGS-B",
+            "bounds": bounds_list,
+            "options": {"ftol": tolerance/10, "gtol": tolerance/10, "maxiter": 1000}
+        }
+
+        result = basinhopping(
+            objective,
+            x0,
+            minimizer_kwargs=minimizer_kwargs,
+            niter=100,
+            T=0.5,
+            stepsize=0.05,
+            take_step=take_bounded_step,
+            interval=10
+        )
+
+        current_objective = objective(result.x)
+        if current_objective < best_objective_value:
+            best_objective_value = current_objective
+            best_solution = result.x
+            if verbose:
+                print(f"New best solution found (objective value: {best_objective_value:.2e})")
+
+        if current_objective < solution_tolerance:
+            is_unique = True
+            for sol in unique_solutions:
+                if np.allclose(result.x, sol, rtol=tolerance/10, atol=tolerance/10):
+                    is_unique = False
+                    break
+
+            if is_unique:
+                unique_solutions.append(result.x)
+                if verbose:
+                    delta_c = result.x[:n_param]
+                    delta_s = result.x[n_param:]
+                    print(f"Found valid solution (attempt {i+1}):")
+                    print(f"  delta_c = {delta_c}")
+                    print(f"  delta_s = {delta_s}")
+
+                    # Verify solution
+                    det_values = det_D_hermitian(result.x, ind_stopband, ind_param, w_tilde_stopband_edges,
+                                                 is_default_value, max_ind_stopband)
+                    print("Verification:")
+                    for j, val in enumerate(det_values):
+                        print(f"  Det{j+1} = {val:.2e}")
+                    print()
+        elif verbose:
+            print(f"No valid solution from starting point {i+1}, objective: {current_objective:.2e}")
+
+    # Return best-effort solution if no valid ones found
+    if len(unique_solutions) == 0 and always_return_best and best_solution is not None:
+        if verbose:
+            print(f"\nNo solutions met tolerance {solution_tolerance}.")
+            print(f"Returning best solution (objective: {best_objective_value:.2e})")
+        unique_solutions.append(best_solution)
+
+    if verbose:
+        print(f"\nFound {len(unique_solutions)} solutions.")
+    return unique_solutions
+
+
 def multi_stage_solution_finding(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
                                 bounds=(-0.5, 0.5), n_attempts=20, tolerance=1e-8, always_return_best=True, verbose=True):
     """
@@ -388,6 +615,118 @@ def multi_stage_solution_finding(ind_stopband, ind_param, w_tilde_stopband_edges
                     print(f"Solution {j+1}: {sol} (delta{i+1} = {sol[i]:.6f})")
     
     return refined_solutions
+
+
+def multi_stage_solution_finding_hermitian(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
+                                            bounds=(-0.5, 0.5), n_attempts=20, tolerance=1e-8, always_return_best=True, verbose=True):
+    """
+    Multi-stage approach to find solutions with Hermitian coupling matrix.
+
+    Parameters:
+    ind_stopband (array): Array of stopband indices
+    ind_param (array): Array of stopband indices for parameters (non-default values)
+    w_tilde_stopband_edges (array): Array of normalized frequencies at stopband edges
+    is_default_value (array): Boolean array indicating which edges are default values
+    max_ind_stopband (int): Maximum stopband index
+    n_param (int): Number of harmonics (actual optimization has 2*n_param parameters)
+    bounds (tuple): Bounds for the solutions
+    n_attempts (int): Number of starting points to try
+    tolerance (float): Tolerance for accepting solutions
+    always_return_best (bool): If True, always return the best solution found
+    verbose (bool): Whether to print progress messages
+
+    Returns:
+    list: List of refined solutions, each of shape (2*n_param,)
+    """
+    n_opt_param = 2 * n_param
+
+    # First stage: Find approximate solutions
+    first_stage_tolerance = tolerance * 100
+    if verbose:
+        print(f"Stage 1: Finding approximate solutions (tolerance: {first_stage_tolerance})...")
+    initial_solutions = find_all_solutions_hermitian(
+        ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
+        bounds=bounds,
+        n_attempts=n_attempts,
+        tolerance=first_stage_tolerance,
+        always_return_best=always_return_best,
+        verbose=verbose
+    )
+
+    if len(initial_solutions) == 0:
+        if verbose:
+            print("No solutions found in Stage 1. Skipping refinement.")
+        return []
+
+    # Second stage: Refine solutions
+    if verbose:
+        print(f"\nStage 2: Refining solutions (tolerance: {tolerance})...")
+    refined_solutions = []
+
+    best_refined_solution = None
+    best_refined_objective_value = float('inf')
+
+    def objective(delta_cs):
+        det_values = det_D_hermitian(delta_cs, ind_stopband, ind_param, w_tilde_stopband_edges,
+                                     is_default_value, max_ind_stopband)
+        return sum(d*d for d in det_values)
+
+    for i, sol in enumerate(initial_solutions):
+        if verbose:
+            print(f"Refining solution {i+1}/{len(initial_solutions)}")
+
+        bounds_list = []
+        for val in sol:
+            lower = max(bounds[0], val - 0.05)
+            upper = min(bounds[1], val + 0.05)
+            bounds_list.append((lower, upper))
+
+        try:
+            result = minimize(
+                objective,
+                sol,
+                method='L-BFGS-B',
+                bounds=bounds_list,
+                options={'ftol': tolerance, 'gtol': tolerance, 'maxiter': 10000}
+            )
+
+            current_objective = objective(result.x)
+            if current_objective < best_refined_objective_value:
+                best_refined_objective_value = current_objective
+                best_refined_solution = result.x
+                if verbose:
+                    print(f"New best refined solution (objective: {best_refined_objective_value:.2e})")
+
+            if current_objective < tolerance:
+                refined_solutions.append(result.x)
+                if verbose:
+                    delta_c = result.x[:n_param]
+                    delta_s = result.x[n_param:]
+                    print(f"Refined solution meets tolerance:")
+                    print(f"  delta_c = {delta_c}")
+                    print(f"  delta_s = {delta_s}")
+            else:
+                if verbose:
+                    print(f"Solution does not meet tolerance. Objective: {current_objective:.2e}")
+        except Exception as e:
+            if verbose:
+                print(f"Error during refinement: {e}")
+            current_objective = objective(sol)
+            if current_objective < best_refined_objective_value:
+                best_refined_objective_value = current_objective
+                best_refined_solution = sol
+
+    if len(refined_solutions) == 0 and always_return_best and best_refined_solution is not None:
+        if verbose:
+            print(f"\nNo refined solutions met tolerance {tolerance}.")
+            print(f"Returning best refined solution (objective: {best_refined_objective_value:.2e})")
+        refined_solutions.append(best_refined_solution)
+
+    if verbose:
+        print(f"\nFinal results: Found {len(refined_solutions)} refined Hermitian solutions.")
+
+    return refined_solutions
+
 
 ################################################################################################
 ################################################################################################
@@ -1362,31 +1701,85 @@ def pl_derived_quantities(f_stopbands_GHz, deltaf_min_GHz, deltaf_max_GHz, f0_GH
 
 
 def calculate_delta_values(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param, skipped_indices,
-                           solution_tolerance=1e-8, always_return_best=True, n_attempts=10, verbose=True):
+                           solution_tolerance=1e-8, always_return_best=True, n_attempts=10, verbose=True,
+                           force_zero_phase=True, g_C_base=None, Ncpersc_cell=None):
+    """
+    Calculate delta values for periodic modulation.
 
-    ################################################################################################
-    # Calculate the delta values for the actual parameters (not the skipped ones)
+    This is the unified entry point that dispatches to either:
+    - Real-symmetric solver (force_zero_phase=True): cosine-only modulation
+    - Hermitian solver (force_zero_phase=False): cosine + sine modulation
 
-    # Define the precision tolerance - can be adjusted for more/less precise solutions
-    # Lower values (e.g., 1e-10) are more precise but harder to find
-    # Higher values (e.g., 1e-6) are less precise but easier to find
-    solution_tolerance = 1e-8  # Default value - adjust as needed
+    Parameters:
+    ind_stopband (array): Array of stopband indices
+    ind_param (array): Array of stopband indices for parameters (non-default values)
+    w_tilde_stopband_edges (array): Array of normalized frequencies at stopband edges
+    is_default_value (array): Boolean array indicating which edges are default values
+    max_ind_stopband (int): Maximum stopband index
+    n_param (int): Number of free parameters
+    skipped_indices (list): List of skipped stopband indices
+    solution_tolerance (float): Tolerance for solution precision
+    always_return_best (bool): If True, always return best solution found
+    n_attempts (int): Number of random starting points
+    verbose (bool): Whether to print progress
+    force_zero_phase (bool): If True, use real-symmetric (cosine-only) modulation.
+                             If False, use Hermitian (cosine + sine) modulation.
+    g_C_base (float): Base capacitance value. Used by Hermitian solver when force_zero_phase=False.
+    Ncpersc_cell (int): Number of cells per supercell. Used by Hermitian solver when force_zero_phase=False.
 
-    # Set to True to always return the best solution found, even if it doesn't meet the tolerance
-    always_return_best = True
+    Returns:
+    tuple: (delta_c_map, delta_s_map, selected_delta_c, selected_delta_s, modulation_info)
+        - For force_zero_phase=True: delta_s_map is empty, selected_delta_s is zeros
+        - For force_zero_phase=False: All values populated from Hermitian solver
+    """
+    if force_zero_phase:
+        # Use original real-symmetric solver
+        delta_map, selected_delta = _calculate_delta_values_real(
+            ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value,
+            max_ind_stopband, n_param, skipped_indices,
+            solution_tolerance=solution_tolerance, always_return_best=always_return_best,
+            n_attempts=n_attempts, verbose=verbose
+        )
 
-    # Number of random starting points to try
-    n_attempts = 10  # Default value: 10 - adjust as needed
+        # Convert to unified return format
+        delta_c_map = delta_map
+        delta_s_map = {}
+        selected_delta_c = selected_delta
+        selected_delta_s = np.zeros_like(selected_delta)
+        modulation_info = {
+            'mode': 'real_symmetric',
+            'peak_deviation': None,
+            'g_min': None,
+            'g_max': None,
+            'feasible': True  # Assumed feasible in old mode
+        }
+
+        return delta_c_map, delta_s_map, selected_delta_c, selected_delta_s, modulation_info
+    else:
+        # Use Hermitian solver
+        return calculate_delta_values_hermitian(
+            ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value,
+            max_ind_stopband, n_param, skipped_indices,
+            solution_tolerance=solution_tolerance, always_return_best=always_return_best,
+            n_attempts=n_attempts, verbose=verbose
+        )
 
 
+def _calculate_delta_values_real(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param, skipped_indices,
+                                  solution_tolerance=1e-8, always_return_best=True, n_attempts=10, verbose=True):
+    """
+    Original real-symmetric delta value calculation (cosine-only modulation).
+    Internal function - use calculate_delta_values as the main entry point.
+    """
     # Run the multi-stage solution finding approach
     delta_solutions = multi_stage_solution_finding(
         ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
-        bounds=(-0.5, 0.5), n_attempts=n_attempts, tolerance=solution_tolerance, 
-        always_return_best=always_return_best, verbose=True)
+        bounds=(-0.5, 0.5), n_attempts=n_attempts, tolerance=solution_tolerance,
+        always_return_best=always_return_best, verbose=verbose)
 
     # Print all solutions
-    print("\nAll solutions found:")
+    if verbose:
+        print("\nAll solutions found:")
     if len(delta_solutions) > 0:
         for i, sol in enumerate(delta_solutions):
             solution_str = f"Solution {i+1}: "
@@ -1394,35 +1787,40 @@ def calculate_delta_values(ind_stopband, ind_param, w_tilde_stopband_edges, is_d
                 # Map parameter index to the actual stopband index
                 sb_idx = ind_param[j]
                 solution_str += f"delta_{sb_idx} = {val:.6f}  "
-            print(solution_str)
+            if verbose:
+                print(solution_str)
 
-        print("Selecting solution with the lowest magnitude deltas...")
-        
+        if verbose:
+            print("Selecting solution with the lowest magnitude deltas...")
+
         # Calculate the total magnitude (sum of absolute values) for each solution
         magnitudes = [(sol, np.sum(np.abs(sol))) for sol in delta_solutions]
-        
+
         # Sort by the total magnitude (ascending)
         sorted_solutions = sorted(magnitudes, key=lambda x: x[1])
-        
+
         # Select the solution with the lowest total magnitude
         selected_delta = sorted_solutions[0][0]
-        
+
         # Print information about the selected solution
-        total_magnitude = np.sum(np.abs(selected_delta))
-        print(f"Selected solution has total magnitude: {total_magnitude:.6f}")
-        solution_str = ""
-        for j, val in enumerate(selected_delta):
-            # Map parameter index to the actual stopband index
-            sb_idx = ind_param[j]
-            solution_str += f"delta_{sb_idx} = {val:.6f}  "
-        print(solution_str)
+        if verbose:
+            total_magnitude = np.sum(np.abs(selected_delta))
+            print(f"Selected solution has total magnitude: {total_magnitude:.6f}")
+            solution_str = ""
+            for j, val in enumerate(selected_delta):
+                # Map parameter index to the actual stopband index
+                sb_idx = ind_param[j]
+                solution_str += f"delta_{sb_idx} = {val:.6f}  "
+            print(solution_str)
     else:
-        print("No solutions found, even best-effort solutions. Using default small magnitude values.")
-        print(f"Try adjusting the solution_tolerance (current: {solution_tolerance}) to a higher value.")
+        if verbose:
+            print("No solutions found, even best-effort solutions. Using default small magnitude values.")
+            print(f"Try adjusting the solution_tolerance (current: {solution_tolerance}) to a higher value.")
         # Create a default solution with small magnitude values
         selected_delta = np.ones(n_param) * 0.01  # Small positive values
 
-    print(f"\nFinal selected solution: {selected_delta}")
+    if verbose:
+        print(f"\nFinal selected solution: {selected_delta}")
 
     # Create a mapping from stopband indices to delta values
     delta_map = {}
@@ -1430,16 +1828,183 @@ def calculate_delta_values(ind_stopband, ind_param, w_tilde_stopband_edges, is_d
         sb_idx = ind_param[j]
         delta_map[sb_idx] = val
 
-    print("\nDelta values mapped to stopband indices:")
-    for idx in sorted(delta_map.keys()):
-        print(f"delta_{idx} = {delta_map[idx]:.6f}")
+    if verbose:
+        print("\nDelta values mapped to stopband indices:")
+        for idx in sorted(delta_map.keys()):
+            print(f"delta_{idx} = {delta_map[idx]:.6f}")
 
-    print(f"\nNote: Stopbands with indices {', '.join(str(idx) for idx in skipped_indices)} were skipped (no free parameters).")
-    print(f"Solution parameters:")
-    print(f"  Tolerance: {solution_tolerance}")
-    print(f"  Always return best: {always_return_best}")
+        print(f"\nNote: Stopbands with indices {', '.join(str(idx) for idx in skipped_indices)} were skipped (no free parameters).")
+        print(f"Solution parameters:")
+        print(f"  Tolerance: {solution_tolerance}")
+        print(f"  Always return best: {always_return_best}")
 
     return delta_map, selected_delta
+
+
+def calculate_delta_values_hermitian(ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param, skipped_indices,
+                                      solution_tolerance=1e-8, always_return_best=True, n_attempts=20, verbose=True):
+    """
+    Calculate delta values using Hermitian coupling matrix (with phase freedom).
+
+    This version finds both cosine (delta_c) and sine (delta_s) components for each harmonic,
+    allowing phase optimization to minimize peak modulation amplitude.
+
+    The modulation is: g_C(x) = 1 + 2*sum_n [delta_c[n]*cos(n*x) + delta_s[n]*sin(n*x)]
+
+    Selection criterion: minimize peak positive deviation (max(g_C) - 1),
+    rejecting solutions where g_C goes negative (infeasible for capacitance).
+
+    Parameters:
+    ind_stopband (array): Array of stopband indices
+    ind_param (array): Array of stopband indices for parameters (non-default values)
+    w_tilde_stopband_edges (array): Array of normalized frequencies at stopband edges
+    is_default_value (array): Boolean array indicating which edges are default values
+    max_ind_stopband (int): Maximum stopband index
+    n_param (int): Number of harmonics
+    skipped_indices (list): List of skipped stopband indices
+    solution_tolerance (float): Tolerance for solution precision
+    always_return_best (bool): If True, always return best solution found
+    n_attempts (int): Number of random starting points
+    verbose (bool): Whether to print progress
+
+    Returns:
+    tuple: (delta_c_map, delta_s_map, selected_delta_c, selected_delta_s, modulation_info)
+           - delta_c_map: dict mapping stopband index to cosine coefficient
+           - delta_s_map: dict mapping stopband index to sine coefficient
+           - selected_delta_c: array of cosine coefficients
+           - selected_delta_s: array of sine coefficients
+           - modulation_info: dict with peak_deviation, g_min, g_max, mode
+    """
+    if verbose:
+        print("\n=== Hermitian Modulation Solver ===")
+
+    # Run the multi-stage solution finding with Hermitian matrix
+    delta_solutions = multi_stage_solution_finding_hermitian(
+        ind_stopband, ind_param, w_tilde_stopband_edges, is_default_value, max_ind_stopband, n_param,
+        bounds=(-0.5, 0.5), n_attempts=n_attempts, tolerance=solution_tolerance,
+        always_return_best=always_return_best, verbose=verbose)
+
+    # Print all solutions
+    if verbose:
+        print(f"\nAll Hermitian solutions found:")
+    if len(delta_solutions) > 0:
+        for i, sol in enumerate(delta_solutions):
+            delta_c = sol[:n_param]
+            delta_s = sol[n_param:]
+
+            # Compute amplitude and phase for each harmonic
+            amplitudes = np.sqrt(delta_c**2 + delta_s**2)
+            phases = np.arctan2(delta_s, delta_c) * 180 / np.pi  # in degrees
+
+            if verbose:
+                print(f"\nSolution {i+1}:")
+                for j in range(n_param):
+                    sb_idx = ind_param[j]
+                    print(f"  Harmonic {sb_idx}: delta_c={delta_c[j]:.6f}, delta_s={delta_s[j]:.6f} "
+                          f"(amplitude={amplitudes[j]:.6f}, phase={phases[j]:.1f}deg)")
+
+            # Evaluate modulation for this solution
+            peak_dev, g_min, g_max = evaluate_modulation(delta_c, delta_s, ind_param)
+            if verbose:
+                if peak_dev == np.inf:
+                    print(f"  ** INFEASIBLE: g_C goes negative (min={g_min:.4f}) **")
+                else:
+                    print(f"  Peak deviation: {peak_dev:.6f}, g_min={g_min:.4f}, g_max={g_max:.4f}")
+
+        # Select solution with smallest peak deviation (feasible solutions only)
+        if verbose:
+            print("\nSelecting solution with smallest peak modulation amplitude...")
+
+        feasible_solutions = []
+        for sol in delta_solutions:
+            delta_c = sol[:n_param]
+            delta_s = sol[n_param:]
+            peak_dev, g_min, g_max = evaluate_modulation(delta_c, delta_s, ind_param)
+            if peak_dev != np.inf:
+                feasible_solutions.append((sol, peak_dev, g_min, g_max))
+
+        if len(feasible_solutions) > 0:
+            # Sort by peak deviation
+            feasible_solutions.sort(key=lambda x: x[1])
+            selected_sol, best_peak_dev, best_g_min, best_g_max = feasible_solutions[0]
+
+            selected_delta_c = selected_sol[:n_param]
+            selected_delta_s = selected_sol[n_param:]
+
+            if verbose:
+                print(f"\nSelected solution (peak deviation: {best_peak_dev:.6f}):")
+                print(f"  g_min = {best_g_min:.4f}, g_max = {best_g_max:.4f}")
+        else:
+            if verbose:
+                print("\nNo feasible solutions found (all have negative g_C)!")
+                print("Falling back to solution with least negative g_min...")
+
+            # Fall back to least-bad solution
+            all_evaluated = []
+            for sol in delta_solutions:
+                delta_c = sol[:n_param]
+                delta_s = sol[n_param:]
+                _, g_min, g_max = evaluate_modulation(delta_c, delta_s, ind_param)
+                all_evaluated.append((sol, g_min, g_max))
+
+            # Sort by g_min (descending, so least negative first)
+            all_evaluated.sort(key=lambda x: x[1], reverse=True)
+            selected_sol, best_g_min, best_g_max = all_evaluated[0]
+
+            selected_delta_c = selected_sol[:n_param]
+            selected_delta_s = selected_sol[n_param:]
+            best_peak_dev = best_g_max - 1
+
+            if verbose:
+                print(f"\nSelected (infeasible) solution:")
+                print(f"  g_min = {best_g_min:.4f}, g_max = {best_g_max:.4f}")
+                print(f"  WARNING: This solution has negative capacitance!")
+    else:
+        if verbose:
+            print("No solutions found, even best-effort solutions. Using default small values.")
+        selected_delta_c = np.ones(n_param) * 0.01
+        selected_delta_s = np.zeros(n_param)
+        best_peak_dev, best_g_min, best_g_max = evaluate_modulation(selected_delta_c, selected_delta_s, ind_param)
+
+    # Compute final amplitudes and phases
+    amplitudes = np.sqrt(selected_delta_c**2 + selected_delta_s**2)
+    phases = np.arctan2(selected_delta_s, selected_delta_c) * 180 / np.pi
+
+    if verbose:
+        print(f"\nFinal selected solution:")
+        for j in range(n_param):
+            sb_idx = ind_param[j]
+            print(f"  Harmonic {sb_idx}: delta_c={selected_delta_c[j]:.6f}, delta_s={selected_delta_s[j]:.6f}")
+            print(f"              amplitude={amplitudes[j]:.6f}, phase={phases[j]:.1f}deg")
+
+    # Create mappings
+    delta_c_map = {}
+    delta_s_map = {}
+    for j in range(n_param):
+        sb_idx = ind_param[j]
+        delta_c_map[sb_idx] = selected_delta_c[j]
+        delta_s_map[sb_idx] = selected_delta_s[j]
+
+    if verbose:
+        print("\nDelta values mapped to stopband indices:")
+        for idx in sorted(delta_c_map.keys()):
+            print(f"  delta_c_{idx} = {delta_c_map[idx]:.6f}, delta_s_{idx} = {delta_s_map[idx]:.6f}")
+
+        print(f"\nNote: Stopbands with indices {', '.join(str(idx) for idx in skipped_indices)} were skipped.")
+
+    # Modulation info for downstream use
+    modulation_info = {
+        'mode': 'hermitian',
+        'peak_deviation': best_peak_dev,
+        'g_min': best_g_min,
+        'g_max': best_g_max,
+        'amplitudes': amplitudes,
+        'phases': phases,
+        'ind_param': ind_param,
+        'feasible': best_g_min > 0
+    }
+
+    return delta_c_map, delta_s_map, selected_delta_c, selected_delta_s, modulation_info
     
 
 ################################# misc helper #################################

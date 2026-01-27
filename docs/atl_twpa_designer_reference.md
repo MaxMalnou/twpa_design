@@ -59,6 +59,8 @@ designer = ATLTWPADesigner(
 # Periodic modulation parameters
 'stopbands_config_GHz': {}           # dict: {freq_GHz: {'min': val, 'max': val}}
                                      # Example: {27: {'max': 4}, 16: {'min': 1}}
+'force_zero_phase': True             # bool: True for cosine-only modulation (default, backward compatible)
+                                     # False for cosine+sine modulation (Hermitian, may reduce peak deviation)
 'window_type': 'boxcar'             # str: 'boxcar', 'tukey', or 'hann'
 'alpha': 0.0                         # float: Window parameter (0-1)
 'n_filters_per_sc': 1                # int: Filters per supercell

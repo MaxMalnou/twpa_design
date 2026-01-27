@@ -57,6 +57,8 @@ Periodic modulation parameters
                         Format: {freq_GHz: {'min': width} or {'max': width}}
                         Example: {27: {'max': 4}} creates a stopband at 27 GHz with upper edge 4 GHz above center.
                         For each stopband, specify EITHER 'min' (lower edge width) or 'max' (upper edge width), not both.
+'force_zero_phase': If True (default), use cosine-only modulation (backward compatible).
+                    If False, use cosine+sine modulation (Hermitian) which may reduce peak modulation deviation.
 'window_type': apodization window at the beginning and end of the periodic modulation. default 'boxcar' (i.e. no window). Can be 'tukey' Or 'hann', 'boxcar'
 'alpha': apodization length (as a proportion of the line's total length) of the window. default: 0.0
 'n_filters_per_sc': number of filters per supercell. default: 1

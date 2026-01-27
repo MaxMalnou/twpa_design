@@ -75,6 +75,8 @@ Periodic modulation parameters
 'stopbands_config_GHz': Dict of {freq_GHz: {'min': val, 'max': val}} for defining stopbands.
                         For each stopband frequency, specify either 'min' or 'max' (not both).
                         Example: {27: {'max': 4}, 16: {'min': 1}}. default: {}
+'force_zero_phase': If True (default), use cosine-only modulation (real-symmetric, backward compatible).
+                    If False, use cosine+sine modulation (Hermitian) which may reduce peak modulation deviation.
 'window_type': apodization window at the beginning and end of the periodic modulation. default 'boxcar' (i.e. no window). Can be 'tukey' Or 'hann', 'boxcar'
 'alpha': apodization length (as a proportion of the line's total length) of the window. default: 0.0
 'n_filters_per_sc': number of filters per supercell. default: 1
@@ -133,7 +135,8 @@ DEFAULT_CONFIG = {
     'select_one_form': 'C', # 'L', 'C', or 'both'
     
     # Periodic modulation parameters
-    'stopbands_config_GHz': {},  # Dict of {freq_GHz: {'min': val, 'max': val}} 
+    'stopbands_config_GHz': {},  # Dict of {freq_GHz: {'min': val, 'max': val}}
+    'force_zero_phase': True,  # True for cosine-only (default), False for cosine+sine (Hermitian)
     'window_type': 'boxcar', # 'tukey' Or 'hann', 'boxcar'
     'alpha': 0.0,
     'n_filters_per_sc': 1,
@@ -190,6 +193,7 @@ class ATLTWPADesigner:
     Foster_form_C: int
     select_one_form: str
     stopbands_config_GHz: Dict[float, Dict[str, Optional[float]]]
+    force_zero_phase: bool
     window_type: str
     alpha: float
     n_filters_per_sc: int
@@ -283,6 +287,12 @@ class ATLTWPADesigner:
     n_periodic_sc: int
     g_C_mod: Optional[npt.NDArray[np.float64]]
     ind_g_C_with_filters: Optional[List[int]]
+    # Hermitian modulation parameters
+    delta_c_map: Dict[int, float]
+    delta_s_map: Dict[int, float]
+    selected_delta_c: npt.NDArray[np.float64]
+    selected_delta_s: npt.NDArray[np.float64]
+    modulation_info: Dict[str, Any]
     k_radpercell: npt.NDArray[np.float64]
     k_radpersc: npt.NDArray[np.float64]
     
@@ -611,25 +621,33 @@ class ATLTWPADesigner:
     def _calculate_periodic_modulation(self):
         """Calculate periodic modulation parameters."""
         # Get derived quantities from helper function
-        (self.n_stopbands, self.v_cellpernsec, self.Ncpersc_cell, 
-         self.w_tilde_stopband_edges, self.ind_stopband, self.is_default_value, 
-         self.w_tilde_param, self.ind_param, self.max_ind_stopband, 
+        (self.n_stopbands, self.v_cellpernsec, self.Ncpersc_cell,
+         self.w_tilde_stopband_edges, self.ind_stopband, self.is_default_value,
+         self.w_tilde_param, self.ind_param, self.max_ind_stopband,
          self.n_param, self.skipped_indices) = pl_derived_quantities(
-            self.f_stopbands_GHz, self.deltaf_min_GHz, self.deltaf_max_GHz, 
+            self.f_stopbands_GHz, self.deltaf_min_GHz, self.deltaf_max_GHz,
             self.fc_TLsec_GHz/np.sqrt(self.g_L*self.g_C)
         )
-        
-        # Calculate delta values
-        self.delta_map, self.selected_delta = calculate_delta_values(
-            self.ind_stopband, self.ind_param, self.w_tilde_stopband_edges, 
-            self.is_default_value, self.max_ind_stopband, self.n_param, 
-            self.skipped_indices
+
+        # Calculate delta values (dispatches based on force_zero_phase)
+        (self.delta_c_map, self.delta_s_map, self.selected_delta_c,
+         self.selected_delta_s, self.modulation_info) = calculate_delta_values(
+            self.ind_stopband, self.ind_param, self.w_tilde_stopband_edges,
+            self.is_default_value, self.max_ind_stopband, self.n_param,
+            self.skipped_indices,
+            force_zero_phase=self.force_zero_phase,
+            g_C_base=self.g_C,
+            Ncpersc_cell=self.Ncpersc_cell
         )
-        
+
+        # Backward compatibility aliases
+        self.delta_map = self.delta_c_map
+        self.selected_delta = self.selected_delta_c
+
         self.nTLsec = 0
         self.Nsc_cell = int(np.round(self.Ntot_cell/self.Ncpersc_cell))
         self.Ntot_cell = int(self.Nsc_cell*self.Ncpersc_cell)
-        
+
         # Window-specific settings
         if self.window_type == 'boxcar':
             self.ngL = self.Ncpersc_cell
@@ -637,21 +655,29 @@ class ATLTWPADesigner:
         else:
             self.ngL = self.Ntot_cell
             self.ngC = self.Ntot_cell
-            
+
         # Calculate cap modulation
         x_tilde = np.linspace(0, 1 - 1/self.Ncpersc_cell, self.Ncpersc_cell) * 2 * np.pi
         g_C_mod = self.g_C * np.ones(self.Ncpersc_cell) # Local variable first
-        
+
         if self.verbose:
-            print("Delta mapping for shunt capacitance modulation:")
-            
-        # Apply delta values
+            print(f"Delta mapping for shunt capacitance modulation (mode: {self.modulation_info['mode']}):")
+
+        # Apply delta values (cosine + sine for Hermitian mode)
         for idx in range(1, self.max_ind_stopband + 1):
-            if idx in self.delta_map:
-                delta_val = self.delta_map[idx]
-                g_C_mod = g_C_mod + 2 * delta_val * np.cos(idx * x_tilde)  # Work with local
+            if idx in self.delta_c_map:
+                delta_c_val = self.delta_c_map[idx]
+                delta_s_val = self.delta_s_map.get(idx, 0.0)
+
+                # Hermitian modulation: cosine + sine terms
+                g_C_mod = g_C_mod + 2 * (delta_c_val * np.cos(idx * x_tilde) +
+                                          delta_s_val * np.sin(idx * x_tilde))
+
                 if self.verbose:
-                    print(f"Applied delta_{idx} = {delta_val:.6f} to mode {idx}")
+                    if delta_s_val != 0:
+                        print(f"Applied delta_c_{idx} = {delta_c_val:.6f}, delta_s_{idx} = {delta_s_val:.6f}")
+                    else:
+                        print(f"Applied delta_{idx} = {delta_c_val:.6f} (cosine only)")
             else:
                 if self.verbose:
                     print(f"Skipped mode {idx} (no free parameter)")
