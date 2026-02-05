@@ -76,8 +76,7 @@ SIMULATION_CONFIGS = {
             pump_freq_GHz=8.63,
             pump_current_A=2.7e-6,
             Npumpharmonics=20,
-            Nmodulationharmonics=10,
-            store_signal_nodeflux=True
+            Nmodulationharmonics=10
         )
     },
     'b_jtwpa': {
@@ -105,11 +104,11 @@ SIMULATION_CONFIGS = {
             freq_step_GHz=0.01,
             pump_freq_GHz=9.1,
             pump_current_A=22e-6,
-            Npumpharmonics=10,
-            Nmodulationharmonics=5,
+            Npumpharmonics=8,
+            Nmodulationharmonics=4,
             iterations=1000,
             ftol=1e-5,  # Increased tolerance for convergence
-            store_signal_nodeflux=True
+            store_signal_nodeflux=False
         )
     }
 }
