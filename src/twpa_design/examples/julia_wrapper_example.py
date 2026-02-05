@@ -76,7 +76,8 @@ SIMULATION_CONFIGS = {
             pump_freq_GHz=8.63,
             pump_current_A=2.7e-6,
             Npumpharmonics=20,
-            Nmodulationharmonics=10
+            Nmodulationharmonics=10,
+            store_signal_nodeflux=True
         )
     },
     'b_jtwpa': {
@@ -105,14 +106,15 @@ SIMULATION_CONFIGS = {
             pump_freq_GHz=9.1,
             pump_current_A=22e-6,
             Npumpharmonics=10,
-            Nmodulationharmonics=10,
+            Nmodulationharmonics=5,
             iterations=1000,
-            ftol=1e-5  # Increased tolerance for convergence
+            ftol=1e-5,  # Increased tolerance for convergence
+            store_signal_nodeflux=True
         )
     }
 }
 
-simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
+simulation_type = "ktwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
 
 # Get the config for the chosen simulation
 if simulation_type in SIMULATION_CONFIGS:
@@ -135,13 +137,21 @@ try:
     # Run everything in one method call with verbose output and auto-save
     results = simulator.run_full_simulation(
         netlist_name=netlist_name,
-        config=sim_config,        
+        config=sim_config,
         verbose=True,        # Set to False for minimal output
         save_results=True,    # Automatically saves both data (.npz) and plot (.svg)
         max_mode_order_to_plot=4
     )
-    
+
     print(f"\n🎯 Simulation '{simulation_type}' completed successfully!")
+
+    # === Plot pump and signal harmonics along the line ===
+    # Pump harmonics: solid purple lines, Signal: dashed blue, Idler: dashed red
+    results.plot_harmonics(
+        max_pump_harmonic=3,
+        max_signal_mode_order=4,
+        signal_freq_GHz=7.0
+    )
 
 except Exception as e:
     print(f"\n❌ Simulation failed: {e}")

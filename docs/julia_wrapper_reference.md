@@ -149,7 +149,10 @@ config = TWPASimulationConfig(
     ftol=None,                    # float: Function tolerance (default: 1e-8)
     switchofflinesearchtol=None,  # float: Linesearch switch (default: 1e-5)
     alphamin=None,                # float: Min step size (default: 1e-4)
-    sorting="name"                # str: Node sorting ("name", "number", "none")
+    sorting="name",               # str: Node sorting ("name", "number", "none")
+
+    # Data storage options
+    store_signal_nodeflux=False   # bool: Store signal nodeflux for harmonics plotting
 )
 ```
 
@@ -182,6 +185,8 @@ config.print_config()  # Print formatted configuration summary
 Container for simulation results with analysis and visualization.
 
 #### Attributes
+
+**S-parameter and Mode Results:**
 - `frequencies_GHz`: numpy array of frequencies
 - `S11`, `S12`, `S21`, `S22`: S-parameter arrays (power)
 - `quantum_efficiency`: QE/QE_ideal array
@@ -191,6 +196,14 @@ Container for simulation results with analysis and visualization.
 - `modes`: List of mode tuples
 - `config`: Stored TWPASimulationConfig (optional)
 - `netlist_name`: Stored netlist name (optional)
+
+**Harmonics Spatial Data (for plotting power along the line):**
+- `pump_nodeflux`: numpy array of pump nodeflux (shape: num_pump_harmonics × num_nodes). Always available.
+- `signal_nodeflux`: numpy array of signal/idler nodeflux. Requires `store_signal_nodeflux=True` in config.
+- `num_pump_harmonics`: int, number of pump harmonics
+- `num_nodes`: int, number of nodes in the circuit
+- `total_cells`: int, total number of cells in the TWPA
+- `pump_freq_Hz`: float, pump frequency in Hz (used for power calculations)
 
 #### Methods
 
@@ -259,6 +272,58 @@ results, fig = TWPAResults.load_and_plot(
 )
 ```
 Convenience method to load and plot in one call.
+
+##### plot_harmonics
+```python
+fig = results.plot_harmonics(
+    ax=None,                    # Optional matplotlib Axes (creates new figure if None)
+    config=None,                # TWPASimulationConfig (uses stored config if None)
+    max_pump_harmonic=3,        # Max pump harmonic to plot (1 = fundamental only)
+    max_signal_mode_order=2,    # Max signal/idler mode order to plot
+    signal_freq_GHz=None,       # Signal frequency for idler plotting (required if signal_nodeflux exists)
+    position_normalized=False,  # If True, x-axis shows 0-1; if False, shows cell numbers
+    save_path=None,             # Optional path to save figure
+    show_plot=True              # Display the plot
+)
+```
+Plot pump and signal/idler power evolution along the transmission line.
+
+**Colors:**
+- Pump: purple (fundamental), pink/yellow/green for harmonics
+- Signal: blue (always plotted on top)
+- Idlers: orange (first), darkblue/red/brown for higher orders
+
+**Requirements:**
+- Pump harmonics always available
+- Signal/idler harmonics require `store_signal_nodeflux=True` in simulation config
+
+##### plot_pump_harmonics
+```python
+fig = results.plot_pump_harmonics(
+    ax=None,
+    config=None,
+    max_pump_harmonic=3,
+    position_normalized=False,
+    save_path=None,
+    show_plot=True
+)
+```
+Convenience wrapper for `plot_harmonics` with pump-only plotting (no signal/idler).
+
+##### plot_signal_harmonics
+```python
+fig = results.plot_signal_harmonics(
+    ax=None,
+    config=None,
+    max_signal_mode_order=2,
+    signal_freq_GHz=None,       # Required
+    position_normalized=False,
+    save_path=None,
+    show_plot=True
+)
+```
+Convenience wrapper for `plot_harmonics` with signal/idler-only plotting.
+Raises `ValueError` if signal nodeflux data is not available.
 
 ---
 
@@ -521,6 +586,58 @@ results_advanced = simulator.run_full_simulation(
     save_results=True
 )
 # User-specified values take precedence over mode defaults!
+```
+
+### Example 11: Plotting Pump and Signal Harmonics Along the Line
+```python
+from twpa_design.julia_wrapper import TWPASimulator, TWPASimulationConfig, TWPAResults
+
+# Run simulation with signal nodeflux storage enabled
+simulator = TWPASimulator()
+results = simulator.run_full_simulation(
+    netlist_name="4wm_ktwpa_5004cells_01",
+    config=TWPASimulationConfig(
+        freq_start_GHz=4.0,
+        freq_stop_GHz=10.0,
+        pump_freq_GHz=9.1,
+        pump_current_A=13e-6,
+        store_signal_nodeflux=True  # Required for signal/idler harmonics!
+    ),
+    save_results=True
+)
+
+# Plot both pump and signal harmonics on same figure
+results.plot_harmonics(
+    max_pump_harmonic=3,        # Plot 1st, 2nd, 3rd pump harmonics
+    max_signal_mode_order=2,    # Plot signal and first 2 idler orders
+    signal_freq_GHz=7.0         # Select which signal frequency to plot
+)
+
+# Plot pump harmonics only (always available, no special config needed)
+results.plot_pump_harmonics(max_pump_harmonic=3)
+
+# Plot signal/idler harmonics only
+results.plot_signal_harmonics(
+    max_signal_mode_order=2,
+    signal_freq_GHz=7.0
+)
+
+# Use normalized position (0-1) instead of cell numbers
+results.plot_harmonics(
+    max_pump_harmonic=2,
+    max_signal_mode_order=1,
+    signal_freq_GHz=7.0,
+    position_normalized=True  # X-axis shows 0-1 instead of cell numbers
+)
+
+# Load saved results and replot harmonics
+results_loaded, metadata = TWPAResults.load("4wm_ktwpa_5004cells_01_pump9.10GHz_01")
+if results_loaded.pump_nodeflux is not None:
+    results_loaded.plot_harmonics(
+        max_pump_harmonic=3,
+        max_signal_mode_order=2,
+        signal_freq_GHz=7.0
+    )
 ```
 
 ---

@@ -23,7 +23,7 @@ plots_params.configure_matplotlib(USE_LATEX)
 from twpa_design.plots_params import linewidth, fontsize, black, blue, red, green, orange, purple, pink, brown, yellow
 
 # Load saved simulation results from .npz file (looks in results/ folder by default)
-filename = "b_jtwpa_2000cells_01_pump14.98GHz_01.npz"  # Replace with your actual filename
+filename = "4wm_ktwpa_5004cells_01_pump9.10GHz_01.npz"  # Replace with your actual filename
 
 # Load results and metadata
 results, metadata = TWPAResults.load(filename)
@@ -302,3 +302,25 @@ print(f"Pump: {config.pump_freq_GHz:.2f} GHz @ {config.pump_current_A*1e6:.1f} Â
 
 # Display the plots (keeps them open)
 plt.show()
+
+
+# ============================================================================
+# Option 3: Plot pump and signal harmonics along the transmission line
+# ============================================================================
+# This requires simulation results saved with store_signal_nodeflux=True
+# for signal/idler data (pump data is always available)
+
+# Load a different simulation with harmonics data
+sim_filename = "4wm_ktwpa_5004cells_01_pump9.10GHz_01"  # Replace with your filename
+print(f"\nLoading simulation results: {sim_filename}")
+results_harmonics, metadata_harmonics = TWPAResults.load(sim_filename)
+
+# Plot pump and signal harmonics along the transmission line
+# Pump: purple (fundamental), pink/yellow/green for higher harmonics
+# Signal: blue (plotted on top), Idler: orange, darkblue, red, brown for higher orders
+if results_harmonics.pump_nodeflux is not None or results_harmonics.signal_nodeflux is not None:
+    results_harmonics.plot_harmonics(
+        max_pump_harmonic=3,        # Plot 1st, 2nd, 3rd pump harmonics
+        max_signal_mode_order=2,    # Plot signal and first 2 idler orders
+        signal_freq_GHz=7.0         # Select which signal frequency to plot
+    )

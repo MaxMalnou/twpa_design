@@ -33,8 +33,9 @@ from .helper_functions import filecounter
 
 # Import plot parameters from package
 from .plots_params import (
-    blue as blue_np, red as red_np, green as green_np, orange as orange_np, 
+    blue as blue_np, red as red_np, green as green_np, orange as orange_np,
     purple as purple_np, brown as brown_np, black as black_np, gray as gray_np,
+    darkblue as darkblue_np, pink as pink_np, yellow as yellow_np,
     linewidth, fontsize, fontsize_legend, fontsize_title
 )
 
@@ -47,6 +48,9 @@ purple = tuple(purple_np)
 brown = tuple(brown_np)
 black = tuple(black_np)
 gray = tuple(gray_np)
+darkblue = tuple(darkblue_np)
+pink = tuple(pink_np)
+yellow = tuple(yellow_np)
 
 # Plot configuration
 PLOT_CONFIG = {
@@ -130,6 +134,9 @@ class TWPASimulationConfig:
     switchofflinesearchtol: Optional[float] = None  # Default: 1e-5
     alphamin: Optional[float] = None  # Default: 1e-4
     sorting: str = "name"  # Default in hbsolve is "number", but we use "name" for consistency
+
+    # Data storage options
+    store_signal_nodeflux: bool = False  # If True, store signal nodeflux for harmonics plotting
 
     def __post_init__(self):
         """Validate and apply mode-specific defaults"""
@@ -319,12 +326,17 @@ def build_julia_sources_string(config: TWPASimulationConfig) -> str:
 
 def build_hbsolve_string(config: TWPASimulationConfig) -> str:
     """Build the hbsolve command string with all options"""
-    
+
     # Basic command
     cmd = "sol = hbsolve(ws, wp, sources, Nmodulationharmonics, Npumpharmonics, circuit, circuitdefs"
-    
+
     # Add optional parameters
     options = config.get_solver_options()
+
+    # Add returnnodeflux if signal nodeflux storage is requested
+    if config.store_signal_nodeflux:
+        options['returnnodeflux'] = True
+
     if options:
         option_strings = []
         for key, value in options.items():
@@ -386,7 +398,18 @@ class TWPAResults:
     netlist_name: Optional[str] = None
     config: Optional[TWPASimulationConfig] = None
 
-    
+    # Pump harmonics data (always available for nonlinear solver)
+    pump_nodeflux: Optional[np.ndarray] = None  # Shape: (num_pump_harmonics, num_nodes)
+    num_pump_harmonics: Optional[int] = None
+    pump_freq_Hz: Optional[float] = None  # Pump frequency in Hz for power calculation
+
+    # Signal harmonics data (requires store_signal_nodeflux=True)
+    signal_nodeflux: Optional[np.ndarray] = None  # Shape varies with modes/ports/freqs
+
+    # Shared spatial info
+    num_nodes: Optional[int] = None
+    total_cells: Optional[int] = None  # From netlist metadata
+
     def save(self, filename: Optional[str] = None,
                 metadata: Optional[dict] = None,
                 config: Optional[TWPASimulationConfig] = None,
@@ -487,7 +510,16 @@ class TWPAResults:
             'idler_response': self.idler_response,
             'backward_idler_response': self.backward_idler_response,
             'modes': self.modes,
-            'netlist_name': self.netlist_name  # Save this in the data too
+            'netlist_name': self.netlist_name,  # Save this in the data too
+            # Pump harmonics data
+            'pump_nodeflux': self.pump_nodeflux,
+            'num_pump_harmonics': self.num_pump_harmonics,
+            'pump_freq_Hz': self.pump_freq_Hz,
+            # Signal harmonics data
+            'signal_nodeflux': self.signal_nodeflux,
+            # Spatial info
+            'num_nodes': self.num_nodes,
+            'total_cells': self.total_cells
         }
         
         # Add metadata if provided
@@ -537,6 +569,14 @@ class TWPAResults:
         if metadata and all(key in metadata for key in ['pump_freq_GHz', 'signal_port', 'output_port']):
             config = cls._config_from_metadata(metadata)
         
+        # Helper to safely get array or None
+        def get_array_or_none(key):
+            if key in data:
+                val = data[key]
+                if val is not None and (not hasattr(val, 'shape') or val.shape != ()):
+                    return val
+            return None
+
         # Create TWPAResults instance
         results = cls(
             frequencies_GHz=data['frequencies_GHz'],
@@ -547,10 +587,19 @@ class TWPAResults:
             quantum_efficiency=data['quantum_efficiency'],
             commutation_error=data['commutation_error'],
             idler_response=data['idler_response'],
-            backward_idler_response=data.get('backward_idler_response', None),
+            backward_idler_response=get_array_or_none('backward_idler_response'),
             modes=data['modes'].tolist() if 'modes' in data else None,
             netlist_name=data.get('netlist_name', metadata.get('netlist_name', None)),
-            config=config  # Reconstructed config
+            config=config,  # Reconstructed config
+            # Pump harmonics data
+            pump_nodeflux=get_array_or_none('pump_nodeflux'),
+            num_pump_harmonics=int(data['num_pump_harmonics']) if 'num_pump_harmonics' in data and data['num_pump_harmonics'] is not None else None,
+            pump_freq_Hz=float(data['pump_freq_Hz']) if 'pump_freq_Hz' in data and data['pump_freq_Hz'] is not None else None,
+            # Signal harmonics data
+            signal_nodeflux=get_array_or_none('signal_nodeflux'),
+            # Spatial info
+            num_nodes=int(data['num_nodes']) if 'num_nodes' in data and data['num_nodes'] is not None else None,
+            total_cells=int(data['total_cells']) if 'total_cells' in data and data['total_cells'] is not None else None
         )
         
         return results, metadata
@@ -899,6 +948,327 @@ class TWPAResults:
         ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
 
+    def plot_pump_harmonics(
+        self,
+        ax: Optional[Axes] = None,
+        config: Optional[TWPASimulationConfig] = None,
+        max_pump_harmonic: int = 3,
+        position_normalized: bool = False,
+        save_path: Optional[str] = None,
+        show_plot: bool = True
+    ) -> Figure:
+        """Plot pump harmonic power distribution along the TWPA.
+
+        Convenience wrapper around plot_harmonics() for pump-only plots.
+        """
+        return self.plot_harmonics(
+            ax=ax, config=config,
+            max_pump_harmonic=max_pump_harmonic,
+            max_signal_mode_order=0,
+            position_normalized=position_normalized,
+            save_path=save_path, show_plot=show_plot
+        )
+
+    def plot_signal_harmonics(
+        self,
+        ax: Optional[Axes] = None,
+        config: Optional[TWPASimulationConfig] = None,
+        max_mode_order: int = 2,
+        signal_freq_GHz: Optional[float] = None,
+        position_normalized: bool = False,
+        save_path: Optional[str] = None,
+        show_plot: bool = True
+    ) -> Figure:
+        """Plot signal/idler power distribution along the TWPA.
+
+        Convenience wrapper around plot_harmonics() for signal-only plots.
+        """
+        return self.plot_harmonics(
+            ax=ax, config=config,
+            max_pump_harmonic=0,
+            max_signal_mode_order=max_mode_order,
+            signal_freq_GHz=signal_freq_GHz,
+            position_normalized=position_normalized,
+            save_path=save_path, show_plot=show_plot
+        )
+
+    def plot_harmonics(
+        self,
+        ax: Optional[Axes] = None,
+        config: Optional[TWPASimulationConfig] = None,
+        max_pump_harmonic: int = 3,
+        max_signal_mode_order: int = 2,
+        signal_freq_GHz: Optional[float] = None,
+        position_normalized: bool = False,
+        save_path: Optional[str] = None,
+        show_plot: bool = True
+    ) -> Figure:
+        """Plot pump and signal/idler power distribution along the TWPA.
+
+        Displays spatial evolution of pump harmonics (solid lines) and
+        signal/idler modes (dashed lines) along the device.
+
+        Colors: pump = purple (lighter for higher harmonics),
+        signal = blue (lighter for higher orders),
+        idler = red (lighter for higher orders).
+
+        Args:
+            ax: Matplotlib axes to plot on. If None, creates new figure.
+            config: Simulation configuration. If None, uses stored config.
+            max_pump_harmonic: Number of pump harmonics to plot (0 to disable).
+            max_signal_mode_order: Max |n| for signal modes to plot (0 to disable).
+            signal_freq_GHz: Signal frequency in GHz for spatial plot. Uses the
+                closest available frequency. If None, uses the center of the band.
+            position_normalized: If True, x-axis is 0-1. If False (default), cell numbers.
+            save_path: Optional path to save the figure.
+            show_plot: Whether to display the plot.
+
+        Returns:
+            matplotlib.figure.Figure: The created figure.
+        """
+        # Use provided config or fall back to stored config
+        config_to_use = config or self.config
+        if not config_to_use:
+            raise ValueError(
+                "No config available. Provide config parameter or ensure "
+                "results have stored config."
+            )
+
+        # Physical constants
+        phi0 = 3.29105976e-16  # Reduced flux quantum (V*s)
+        Z0 = 50.0  # Characteristic impedance (Ohms)
+        w_pump = 2 * np.pi * config_to_use.pump_freq_GHz * 1e9
+
+        # Determine number of nodes and total cells
+        if self.pump_nodeflux is not None and self.pump_nodeflux.ndim > 1:
+            num_nodes = self.pump_nodeflux.shape[1]
+        elif self.signal_nodeflux is not None and self.signal_nodeflux.ndim == 5:
+            num_nodes = self.signal_nodeflux.shape[1]
+        elif self.num_nodes is not None:
+            num_nodes = self.num_nodes
+        else:
+            raise ValueError("No nodeflux data available.")
+
+        total_cells = self.total_cells if self.total_cells else num_nodes
+
+        # Create position array
+        if position_normalized:
+            position = np.linspace(0, 1, num_nodes)
+            xlabel = 'Normalized position'
+        else:
+            position = np.linspace(1, total_cells, num_nodes)
+            xlabel = 'Cell number'
+
+        # Create figure if no axes provided
+        create_new_figure = ax is None
+        if create_new_figure:
+            fig = plt.figure(figsize=(8.6/2.54, 3.5))
+            ax = fig.add_subplot(1, 1, 1)
+        else:
+            fig = ax.get_figure()
+
+        # Color scheme:
+        #   Pump: purple (fundamental), then brown, darkblue, ... for higher harmonics
+        #   Signal (n=0): blue — plotted last so it's on top
+        #   First idler: orange, then red, green, pink, ... for higher orders
+        pump_colors = [purple, brown, darkblue, pink]
+        idler_colors = [orange, red, green, pink, yellow]
+        signal_color = blue
+
+        legend_handles = []
+
+        # === Pump harmonics (solid lines) ===
+        if max_pump_harmonic > 0 and self.pump_nodeflux is not None:
+            nodeflux_pump = self.pump_nodeflux
+            num_harmonics = nodeflux_pump.shape[0] if nodeflux_pump.ndim > 1 else 1
+            harmonics_to_plot = min(max_pump_harmonic, num_harmonics)
+
+            for h in range(harmonics_to_plot):
+                harmonic_number = h + 1
+
+                if nodeflux_pump.ndim > 1:
+                    flux_harmonic = nodeflux_pump[h, :]
+                else:
+                    flux_harmonic = nodeflux_pump
+
+                w_harmonic = harmonic_number * w_pump
+                I_magnitude = np.abs(flux_harmonic) * w_harmonic * phi0 / Z0
+                power_watts = 0.5 * I_magnitude**2 * Z0
+                power_dBm = 10 * np.log10(power_watts * 1000 + 1e-30)
+
+                freq_GHz = harmonic_number * config_to_use.pump_freq_GHz
+                if harmonic_number == 1:
+                    harm_label = r"$1\times f_p$"
+                else:
+                    harm_label = rf"${harmonic_number}\times f_p$"
+                full_label = f"{harm_label} ({freq_GHz:.1f} GHz)"
+
+                color = pump_colors[h % len(pump_colors)]
+                line, = ax.plot(
+                    position, power_dBm,
+                    color=color, linewidth=linewidth,
+                    linestyle='-', label=full_label
+                )
+                legend_handles.append(line)
+
+        # === Signal/idler modes (dashed lines) ===
+        # Signal (n=0) is plotted last so it appears on top
+        if max_signal_mode_order > 0 and self.signal_nodeflux is not None:
+            nodeflux_sig = self.signal_nodeflux
+
+            if self.modes is None:
+                raise ValueError("Mode information not available in results.")
+
+            modes = self.modes
+            n_to_mode_idx = {}
+            for mode_idx in range(len(modes)):
+                mode_n = modes[mode_idx][0]
+                n_to_mode_idx[mode_n] = mode_idx
+
+            # Signal mode is (0,): f_s + 0*f_a = f_s
+            signal_mode_n = 0
+            if signal_mode_n not in n_to_mode_idx:
+                raise ValueError(f"Signal mode (0,) not found in modes: {modes}")
+            input_mode_idx = n_to_mode_idx[signal_mode_n]
+
+            # Input port (0-based)
+            input_port_idx = config_to_use.signal_port - 1
+
+            # Get frequency array and find closest index
+            freq_array = config_to_use.frequency_array()  # in Hz
+            freq_array_GHz = freq_array * 1e-9
+
+            if signal_freq_GHz is None:
+                # Default: center of the band
+                signal_freq_GHz = (config_to_use.freq_start_GHz + config_to_use.freq_stop_GHz) / 2
+
+            freq_index = int(np.argmin(np.abs(freq_array_GHz - signal_freq_GHz)))
+            actual_freq_GHz = freq_array_GHz[freq_index]
+            freq_signal_Hz = freq_array[freq_index]
+
+            if abs(actual_freq_GHz - signal_freq_GHz) > config_to_use.freq_step_GHz:
+                print(f"  Note: Requested {signal_freq_GHz:.2f} GHz, using closest: {actual_freq_GHz:.2f} GHz")
+
+            # Validate freq_index against nodeflux shape
+            if nodeflux_sig.ndim == 5:
+                n_freqs = nodeflux_sig.shape[4]
+                num_nodes_sig = nodeflux_sig.shape[1]
+            elif nodeflux_sig.ndim == 3:
+                n_freqs = nodeflux_sig.shape[2]
+                num_nodes_sig = nodeflux_sig.shape[0] // len(modes)
+            else:
+                raise ValueError(f"Unexpected signal nodeflux shape: {nodeflux_sig.shape}")
+
+            if freq_index >= n_freqs:
+                raise ValueError(f"freq_index={freq_index} out of range (0 to {n_freqs-1})")
+
+            # Build plot order: idlers and higher modes first, signal (n=0) LAST
+            available_modes = sorted(n_to_mode_idx.keys())
+            max_abs_n = min(max(abs(n) for n in available_modes), max_signal_mode_order)
+
+            # Collect idlers/higher modes (everything except signal n=0)
+            plot_order = []
+            for i in range(1, max_abs_n + 1):
+                if -i in n_to_mode_idx:
+                    plot_order.append(-i)
+                if i in n_to_mode_idx:
+                    plot_order.append(i)
+            # Signal (n=0) goes last so it's drawn on top
+            if 0 in n_to_mode_idx:
+                plot_order.append(0)
+
+            # Helper to compute and plot one mode
+            def _plot_signal_mode(mode_n, color, legend_list):
+                output_mode_idx = n_to_mode_idx[mode_n]
+
+                if nodeflux_sig.ndim == 5:
+                    flux_spatial = nodeflux_sig[output_mode_idx, :, input_mode_idx, input_port_idx, freq_index]
+                elif nodeflux_sig.ndim == 3:
+                    num_modes_raw = len(modes)
+                    row_start = output_mode_idx * num_nodes_sig
+                    row_end = row_start + num_nodes_sig
+                    n_ports = nodeflux_sig.shape[1] // num_modes_raw
+                    col = input_mode_idx * n_ports + input_port_idx
+                    flux_spatial = nodeflux_sig[row_start:row_end, col, freq_index]
+
+                w_mode = 2 * np.pi * freq_signal_Hz + mode_n * w_pump
+                I_magnitude = np.abs(flux_spatial) * np.abs(w_mode) * phi0 / Z0
+                power_watts = 0.5 * I_magnitude**2 * Z0
+                power_dBm = 10 * np.log10(power_watts * 1000 + 1e-30)
+
+                label = get_mode_label(mode_n, config_to_use.pump_freq_GHz)
+                freq_mode_GHz = np.abs(freq_signal_Hz * 1e-9 + mode_n * config_to_use.pump_freq_GHz)
+                full_label = f"{label} ({freq_mode_GHz:.1f} GHz)"
+
+                line, = ax.plot(
+                    position, power_dBm,
+                    color=color, linewidth=linewidth,
+                    label=full_label
+                )
+                legend_list.append(line)
+
+            # Assign colors: idlers get idler_colors, signal gets signal_color
+            idler_idx = 0
+            for mode_n in plot_order:
+                if mode_n == 0:
+                    _plot_signal_mode(mode_n, signal_color, legend_handles)
+                else:
+                    color = idler_colors[idler_idx % len(idler_colors)]
+                    _plot_signal_mode(mode_n, color, legend_handles)
+                    idler_idx += 1
+
+        # === Styling ===
+        ax.set_xlabel(xlabel, fontsize=fontsize)
+        ax.set_ylabel('Power [dBm]', fontsize=fontsize)
+
+        # Build title
+        has_pump = max_pump_harmonic > 0 and self.pump_nodeflux is not None
+        has_signal = max_signal_mode_order > 0 and self.signal_nodeflux is not None
+        if has_pump and has_signal:
+            title = f'Harmonics along line ($f_s$ = {actual_freq_GHz:.2f} GHz)'
+        elif has_signal:
+            title = f'Signal Harmonics ($f_s$ = {actual_freq_GHz:.2f} GHz)'
+        else:
+            title = 'Pump Harmonics'
+        ax.set_title(title, fontsize=fontsize_title)
+
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='both', labelsize=fontsize)
+
+        if position_normalized:
+            ax.set_xlim(0, 1)
+        else:
+            ax.set_xlim(1, total_cells)
+
+        ax.legend(
+            handles=legend_handles,
+            loc='best',
+            fontsize=fontsize_legend,
+            frameon=True,
+            fancybox=True,
+            framealpha=0.7,
+            facecolor='white',
+            edgecolor='gray',
+            borderpad=0.3,
+            handlelength=1.5,
+            handletextpad=0.5,
+            borderaxespad=0.5
+        )
+
+        ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
+
+        if create_new_figure:
+            plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, format='svg', bbox_inches='tight')
+            print(f"Harmonics plot saved to: {save_path}")
+
+        if show_plot and create_new_figure:
+            plt.show()
+
+        return fig
 
     @classmethod
     def load_and_plot(cls, filename: str, show_plot: bool = True, 
@@ -1642,6 +2012,92 @@ class TWPASimulator:
             except:
                 modes = None
 
+        # Helper: get node sort index from Julia keyed array or from netlist
+        def _get_node_sort_idx(jl_nodeflux_expr, num_nodes):
+            """Get sort index to reorder nodes from alphabetical to spatial order.
+
+            With sorting="name" in the solver, nodes are alphabetically ordered
+            (e.g. "1","10","100",...,"2","20",...). We need numerical order for
+            spatial plots. Tries Julia axiskeys first, falls back to netlist.
+            """
+            # Try getting node names from Julia keyed array
+            try:
+                node_names = list(self.jl.eval(
+                    f'collect(string.(JosephsonCircuits.AxisKeys.axiskeys({jl_nodeflux_expr}, 2)))'
+                ))
+                sort_idx = np.argsort([int(n) for n in node_names])
+                print(f"    Node order from keyed array: reordering {num_nodes} nodes to spatial order")
+                return sort_idx
+            except Exception as e1:
+                print(f"    Note: axiskeys not available ({e1}), trying netlist fallback...")
+
+            # Fallback: extract node names from netlist components
+            try:
+                all_nodes = set()
+                for _, node1, node2, _ in self.jc_components:
+                    if node1 != '0':
+                        all_nodes.add(node1)
+                    if node2 != '0':
+                        all_nodes.add(node2)
+                # The keyed array has nodes sorted by sorting="name" (alphabetical)
+                nodes_alpha = sorted(all_nodes)  # alphabetical, same as Julia
+                if len(nodes_alpha) == num_nodes:
+                    sort_idx = np.argsort([int(n) for n in nodes_alpha])
+                    print(f"    Node order from netlist: reordering {num_nodes} nodes to spatial order")
+                    return sort_idx
+                else:
+                    print(f"    Warning: netlist has {len(nodes_alpha)} nodes vs {num_nodes} in nodeflux")
+            except Exception as e2:
+                print(f"    Warning: Could not determine node order: {e2}")
+
+            return None
+
+        # Extract pump nodeflux (always available for nonlinear solver)
+        pump_nodeflux = None
+        num_pump_harmonics = None
+        num_nodes = None
+        pump_freq_Hz = None
+        node_sort_idx = None
+        if config.solver_mode == "nonlinear":
+            print("  Extracting pump nodeflux...")
+            try:
+                pump_nodeflux = np.array(self.jl.eval('sol.nonlinear.nodeflux'))
+                num_nodes = pump_nodeflux.shape[1] if pump_nodeflux.ndim > 1 else 1
+                num_pump_harmonics = pump_nodeflux.shape[0] if pump_nodeflux.ndim > 1 else 1
+                pump_freq_Hz = config.pump_freq_GHz * 1e9
+                print(f"    Found {num_pump_harmonics} pump harmonics across {num_nodes} nodes")
+
+                # Reorder nodes to spatial order
+                node_sort_idx = _get_node_sort_idx('sol.nonlinear.nodeflux', num_nodes)
+                if node_sort_idx is not None:
+                    pump_nodeflux = pump_nodeflux[:, node_sort_idx]
+            except Exception as e:
+                print(f"    Warning: Could not extract pump nodeflux: {e}")
+
+        # Extract signal nodeflux (only if store_signal_nodeflux=True)
+        signal_nodeflux = None
+        if config.store_signal_nodeflux:
+            print("  Extracting signal nodeflux...")
+            try:
+                signal_nodeflux = np.array(self.jl.eval(f'{result_path}.nodeflux'))
+                print(f"    Signal nodeflux shape: {signal_nodeflux.shape}")
+
+                # Reorder node dimension (dim 1) to spatial order
+                if signal_nodeflux.ndim == 5:
+                    num_nodes_sig = signal_nodeflux.shape[1]
+                    sig_sort_idx = node_sort_idx  # reuse if same size
+                    if sig_sort_idx is None or len(sig_sort_idx) != num_nodes_sig:
+                        sig_sort_idx = _get_node_sort_idx(
+                            f'{result_path}.nodeflux', num_nodes_sig
+                        )
+                    if sig_sort_idx is not None:
+                        signal_nodeflux = signal_nodeflux[:, sig_sort_idx, :, :, :]
+            except Exception as e:
+                print(f"    Warning: Could not extract signal nodeflux: {e}")
+
+        # Get total_cells from netlist metadata
+        total_cells = self.metadata.get('total_cells', num_nodes)
+
         return TWPAResults(
             frequencies_GHz=frequencies_GHz,
             S11=S11, S12=S12, S21=S21, S22=S22,
@@ -1651,7 +2107,13 @@ class TWPASimulator:
             backward_idler_response=backward_idler,
             modes=modes,
             netlist_name=self.current_netlist_name,
-            config=config
+            config=config,
+            pump_nodeflux=pump_nodeflux,
+            num_pump_harmonics=num_pump_harmonics,
+            pump_freq_Hz=pump_freq_Hz,
+            signal_nodeflux=signal_nodeflux,
+            num_nodes=num_nodes,
+            total_cells=total_cells
         )
 
     def _display_quick_results(self, results: TWPAResults, config: TWPASimulationConfig, 

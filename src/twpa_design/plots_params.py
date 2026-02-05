@@ -151,3 +151,4 @@ light_green = lighten_color(green, 0.7)  # 70% lighter
 light_red = lighten_color(red, 0.7)      # 70% lighter
 light_blue = lighten_color(blue, 0.7)      # 70% lighter
 light_orange = lighten_color(orange, 0.7)      # 70% lighter
+light_purple = lighten_color(purple, 0.7)      # 70% lighter
