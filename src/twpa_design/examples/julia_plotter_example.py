@@ -310,10 +310,8 @@ plt.show()
 # This requires simulation results saved with store_signal_nodeflux=True
 # for signal/idler data (pump data is always available)
 
-# Load a different simulation with harmonics data
-sim_filename = "4wm_ktwpa_5004cells_01_pump9.10GHz_01"  # Replace with your filename
-print(f"\nLoading simulation results: {sim_filename}")
-results_harmonics, metadata_harmonics = TWPAResults.load(sim_filename)
+print(f"\nLoading simulation results: {filename}")
+results_harmonics, metadata_harmonics = TWPAResults.load(filename)
 
 # Plot pump and signal harmonics along the transmission line
 # Pump: purple (fundamental), pink/yellow/green for higher harmonics
