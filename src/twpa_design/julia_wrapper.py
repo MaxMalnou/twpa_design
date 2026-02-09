@@ -13,8 +13,9 @@ import numpy as np
 import os
 import json
 import re
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Tuple, Optional, Any, Union, Set
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -83,6 +84,71 @@ def get_mode_label(n: int, pump_freq_GHz: float) -> str:
 
 # Physical constants
 FLUX_QUANTUM = 2.067833848e-15  # Wb (Φ₀)
+
+
+def _find_port_node(jc_components: list, port_number: int) -> str:
+    """Find the circuit node connected to a given port number.
+
+    Port components have the form ('P1_0', 'node', '0', 'port_num').
+    Returns the non-ground node string.
+    """
+    for name, node1, node2, value in jc_components:
+        if name.startswith('P') and value == str(port_number):
+            return node1 if node2 == '0' else node2
+    raise ValueError(f"Port {port_number} not found in netlist")
+
+
+def _find_main_line_nodes(jc_components: list, port1_node: str, port2_node: str) -> Set[str]:
+    """Find main-line nodes using graph connectivity testing.
+
+    A node is "main-line" if removing it from the circuit graph (ignoring
+    ground) disconnects port1 from port2. Side-branch nodes (internal to
+    filters or parallel structures) are excluded.
+
+    Args:
+        jc_components: List of (name, node1, node2, value) tuples.
+        port1_node: Node name string for port 1.
+        port2_node: Node name string for port 2.
+
+    Returns:
+        Set of node name strings that are on the main line.
+    """
+    # Build adjacency list, ignoring ground ('0')
+    graph = defaultdict(set)
+    all_nodes = set()
+    for _, node1, node2, _ in jc_components:
+        if node1 != '0' and node2 != '0':
+            graph[node1].add(node2)
+            graph[node2].add(node1)
+        if node1 != '0':
+            all_nodes.add(node1)
+        if node2 != '0':
+            all_nodes.add(node2)
+
+    def _is_connected_without(excluded: str) -> bool:
+        """BFS to check if port1 and port2 are connected after removing a node."""
+        if port1_node == excluded or port2_node == excluded:
+            return False
+        visited = {excluded}
+        queue = deque([port1_node])
+        visited.add(port1_node)
+        while queue:
+            current = queue.popleft()
+            if current == port2_node:
+                return True
+            for neighbor in graph[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        return False
+
+    # A node is main-line if removing it disconnects port1 from port2
+    main_line = set()
+    for node in all_nodes:
+        if not _is_connected_without(node):
+            main_line.add(node)
+
+    return main_line
 
 
 @dataclass
@@ -409,6 +475,7 @@ class TWPAResults:
     # Shared spatial info
     num_nodes: Optional[int] = None
     total_cells: Optional[int] = None  # From netlist metadata
+    main_line_node_indices: Optional[np.ndarray] = None  # Indices into sorted nodeflux for main-line nodes
 
     def save(self, filename: Optional[str] = None,
                 metadata: Optional[dict] = None,
@@ -519,7 +586,8 @@ class TWPAResults:
             'signal_nodeflux': self.signal_nodeflux,
             # Spatial info
             'num_nodes': self.num_nodes,
-            'total_cells': self.total_cells
+            'total_cells': self.total_cells,
+            'main_line_node_indices': self.main_line_node_indices
         }
         
         # Add metadata if provided
@@ -599,7 +667,8 @@ class TWPAResults:
             signal_nodeflux=get_array_or_none('signal_nodeflux'),
             # Spatial info
             num_nodes=int(data['num_nodes']) if 'num_nodes' in data and data['num_nodes'] is not None else None,
-            total_cells=int(data['total_cells']) if 'total_cells' in data and data['total_cells'] is not None else None
+            total_cells=int(data['total_cells']) if 'total_cells' in data and data['total_cells'] is not None else None,
+            main_line_node_indices=get_array_or_none('main_line_node_indices')
         )
         
         return results, metadata
@@ -1051,12 +1120,20 @@ class TWPAResults:
 
         total_cells = self.total_cells if self.total_cells else num_nodes
 
+        # Filter to main-line nodes if available (skip side-branch/filter nodes)
+        main_line_idx = self.main_line_node_indices
+        if main_line_idx is not None and len(main_line_idx) > 0:
+            num_plot_nodes = len(main_line_idx)
+        else:
+            main_line_idx = None  # Plot all nodes (fallback)
+            num_plot_nodes = num_nodes
+
         # Create position array
         if position_normalized:
-            position = np.linspace(0, 1, num_nodes)
+            position = np.linspace(0, 1, num_plot_nodes)
             xlabel = 'Normalized position'
         else:
-            position = np.linspace(1, total_cells, num_nodes)
+            position = np.linspace(1, total_cells, num_plot_nodes)
             xlabel = 'Cell number'
 
         # Create figure if no axes provided
@@ -1087,7 +1164,7 @@ class TWPAResults:
                 harmonic_number = h + 1
 
                 if nodeflux_pump.ndim > 1:
-                    flux_harmonic = nodeflux_pump[h, :]
+                    flux_harmonic = nodeflux_pump[h, main_line_idx] if main_line_idx is not None else nodeflux_pump[h, :]
                 else:
                     flux_harmonic = nodeflux_pump
 
@@ -1190,6 +1267,10 @@ class TWPAResults:
                     n_ports = nodeflux_sig.shape[1] // num_modes_raw
                     col = input_mode_idx * n_ports + input_port_idx
                     flux_spatial = nodeflux_sig[row_start:row_end, col, freq_index]
+
+                # Filter to main-line nodes
+                if main_line_idx is not None:
+                    flux_spatial = flux_spatial[main_line_idx]
 
                 w_mode = 2 * np.pi * freq_signal_Hz + mode_n * w_pump
                 I_magnitude = np.abs(flux_spatial) * np.abs(w_mode) * phi0 / Z0
@@ -2098,6 +2179,43 @@ class TWPASimulator:
         # Get total_cells from netlist metadata
         total_cells = self.metadata.get('total_cells', num_nodes)
 
+        # Identify main-line nodes (nodes on every path from port1 to port2)
+        main_line_node_indices = None
+        if node_sort_idx is not None and num_nodes is not None:
+            try:
+                # Get all non-ground node names from netlist
+                all_node_names = set()
+                for _, n1, n2, _ in self.jc_components:
+                    if n1 != '0':
+                        all_node_names.add(n1)
+                    if n2 != '0':
+                        all_node_names.add(n2)
+
+                # Alphabetically sorted (same order as Julia with sorting="name")
+                alpha_sorted = sorted(all_node_names)
+
+                if len(alpha_sorted) == num_nodes:
+                    # Numerically sorted names (after applying sort_idx)
+                    sorted_node_names = [alpha_sorted[i] for i in node_sort_idx]
+
+                    # Find port nodes from netlist
+                    port1_node = _find_port_node(self.jc_components, config.signal_port)
+                    port2_node = _find_port_node(self.jc_components, config.output_port)
+
+                    # Find main-line nodes via graph connectivity
+                    main_line_set = _find_main_line_nodes(
+                        self.jc_components, port1_node, port2_node
+                    )
+
+                    # Get indices of main-line nodes in the numerically sorted array
+                    main_line_node_indices = np.array([
+                        i for i, name in enumerate(sorted_node_names)
+                        if name in main_line_set
+                    ])
+                    print(f"    Main-line nodes: {len(main_line_node_indices)} of {num_nodes}")
+            except Exception as e:
+                print(f"    Warning: Could not identify main-line nodes: {e}")
+
         return TWPAResults(
             frequencies_GHz=frequencies_GHz,
             S11=S11, S12=S12, S21=S21, S22=S22,
@@ -2113,7 +2231,8 @@ class TWPASimulator:
             pump_freq_Hz=pump_freq_Hz,
             signal_nodeflux=signal_nodeflux,
             num_nodes=num_nodes,
-            total_cells=total_cells
+            total_cells=total_cells,
+            main_line_node_indices=main_line_node_indices
         )
 
     def _display_quick_results(self, results: TWPAResults, config: TWPASimulationConfig, 

@@ -204,6 +204,7 @@ Container for simulation results with analysis and visualization.
 - `num_nodes`: int, number of nodes in the circuit
 - `total_cells`: int, total number of cells in the TWPA
 - `pump_freq_Hz`: float, pump frequency in Hz (used for power calculations)
+- `main_line_node_indices`: numpy array of indices into the sorted nodeflux arrays selecting only main-line nodes (nodes on every path from port 1 to port 2). Side-branch nodes (internal to filters) are excluded. Computed automatically; used by `plot_harmonics()` for cleaner spatial plots.
 
 #### Methods
 
