@@ -4,11 +4,12 @@ A comprehensive Python package for designing and simulating Traveling Wave Param
 
 ## Features
 
-The package provides three main modules:
+The package provides four main modules:
 
 - **🎯 ATL TWPA Designer**: Design TWPAs with engineered dispersion through filters and/or periodic modulation
 - **⚡ Netlist Builder**: Convert TWPA designs into circuit netlists compatible with JosephsonCircuits.jl
-- **🧪 Julia Wrapper**: Run harmonic balance simulations via JosephsonCircuits.jl from Python
+- **🔧 Filter Builder**: Design peripheral filters, diplexers, and N-way multiplexers, and compose them with TWPA netlists for multi-port device simulation
+- **🧪 Julia Wrapper**: Run harmonic balance simulations via JosephsonCircuits.jl from Python, with full N-port S-matrix and harmonic extraction
 
 ## Installation
 
@@ -109,13 +110,14 @@ results = simulator.run_full_simulation(
         pump_freq_GHz=8.63,
         pump_current_A=2.7e-6
     ),
-    save_results=True,
+    save_results=True,  # Save .npz data and .svg plot
     show_plot=True
 )
 ```
 
-## Typical Workflow
+## Typical Workflows
 
+### Standard 2-port TWPA
 ```
 Design TWPA → Generate Netlist → Run Simulation → Analyze Results
     ↓              ↓                 ↓               ↓
@@ -127,11 +129,24 @@ ATL Designer → Netlist Builder → Julia Wrapper → Results Analysis
 3. **Simulate**: Use `TWPASimulator` to run harmonic balance analysis and calculate S-parameters
 4. **Analyze**: Built-in plotting and analysis tools for gain, bandwidth, and quantum efficiency
 
+### Multi-port diplexed TWPA
+```
+Design Diplexers → Compose with TWPA → Run Simulation → Analyze N-port Results
+      ↓                   ↓                  ↓                    ↓
+Filter Builder → compose_chain() → Julia Wrapper → s_param(j,k), s_harmonic(n,j,k)
+```
+
+1. **Design peripherals**: Use `design_multiplexer` to create LP/HP diplexers (Butterworth or Chebyshev)
+2. **Compose**: Use `compose_chain` to stitch diplexers onto TWPA netlists (e.g., diplexer → TWPA → diplexer)
+3. **Simulate**: The composed N-port netlist runs directly in `TWPASimulator`
+4. **Analyze**: Full S-matrix across all ports and all harmonic modes via `results.s_param(j, k)` and `results.s_harmonic(n, j, k)`
+
 ## Documentation
 
 - **[ATL TWPA Designer Reference](docs/atl_twpa_designer_reference.md)** - Complete guide to TWPA design
 - **[Netlist Builder Reference](docs/netlist_JC_builder_reference.md)** - Circuit netlist generation
-- **[Julia Wrapper Reference](docs/julia_wrapper_reference.md)** - Harmonic balance simulations
+- **[Filter Builder Reference](docs/filter_builder_reference.md)** - Peripheral filter/diplexer design and composition
+- **[Julia Wrapper Reference](docs/julia_wrapper_reference.md)** - Harmonic balance simulations with N-port S-matrix support
 
 ## Package Structure
 
@@ -142,12 +157,14 @@ twpa_design/
 ├── docs/                           # Detailed documentation
 │   ├── atl_twpa_designer_reference.md
 │   ├── netlist_JC_builder_reference.md
+│   ├── filter_builder_reference.md
 │   └── julia_wrapper_reference.md
 └── src/twpa_design/
     ├── __init__.py
     ├── atl_twpa_designer.py        # TWPA design module
     ├── netlist_JC_builder.py       # Circuit netlist generator
-    ├── julia_wrapper.py            # JosephsonCircuits.jl interface
+    ├── filter_builder.py           # Peripheral filter/diplexer/multiplexer design
+    ├── julia_wrapper.py            # JosephsonCircuits.jl interface (N-port S-matrix)
     ├── julia_setup.py              # Julia environment setup
     ├── helper_functions.py         # Utility functions
     ├── plots_params.py             # Plotting configuration
@@ -159,7 +176,8 @@ twpa_design/
     │   ├── atl_twpa_designer_example.py
     │   ├── atl_twpa_plotter_example.py
     │   ├── netlist_JC_builder_example.py
-    │   └── julia_wrapper_example.py
+    │   ├── julia_wrapper_example.py
+    │   └── diplexer_twpa_example.py
     ├── netlists/                   # Example circuit netlists
     │   ├── 4wm_jtwpa_2002cells_01.py
     │   ├── 4wm_ktwpa_5004cells_01.py
@@ -229,6 +247,20 @@ Two modeling approaches:
 
 - ⭕ Netlist visualization
 - ⭕ Systematic workflow for multi-mode resonator-based parametric amplifiers
+- ⭕ Chebyshev Type II filter support in filter builder
+- ⭕ TWPA-TWPA cascade topology examples (diplexer → TWPA → diplexer → TWPA → diplexer)
+
+## Testing
+
+Run the test suite (no Julia required):
+
+```bash
+pip install pytest
+python -m pytest           # run all tests
+python -m pytest -v        # verbose output
+```
+
+Tests cover: module imports, g-value computation against known tables, filter/multiplexer netlist generation, topology composition, S-matrix save/load backward compatibility, and syntax checks on all source files.
 
 ## License
 

@@ -56,7 +56,7 @@ results = simulator.run_full_simulation(
     config,                 # TWPASimulationConfig object
     verbose=True,           # bool: Print detailed progress
     force_julia_reinit=False,  # bool: Force Julia restart
-    save_results=True,      # bool: Auto-save data and plot
+    save_results=False,     # bool: Auto-save data and plot (default: False)
     show_plot=True,         # bool: Display plot (default: True)
     max_mode_order_to_plot=2,  # int: Max idler mode order to plot
     output_dir=None         # str: Output directory (None uses package's results/ folder)
@@ -186,16 +186,22 @@ Container for simulation results with analysis and visualization.
 
 #### Attributes
 
-**S-parameter and Mode Results:**
+**Full S-matrix Data:**
 - `frequencies_GHz`: numpy array of frequencies
-- `S11`, `S12`, `S21`, `S22`: S-parameter arrays (power)
+- `S_fund`: Full fundamental-mode S-matrix, shape `(n_ports, n_ports, n_freqs)`. `S_fund[i, j, :]` = |S_{port i+1, port j+1}|^2 at mode (0,).
+- `S_harmonic`: Full harmonic S-matrix, shape `(n_modes, n_ports, n_ports, n_freqs)`. `S_harmonic[m, i, j, :]` = |S(mode m, port i+1, (0,), port j+1)|^2. `None` in linear mode.
+- `port_count`: Number of ports in the circuit
+- `port_numbers`: List of port numbers (e.g. `[1, 2]` or `[1, 2, 3, 4]`)
 - `quantum_efficiency`: QE/QE_ideal array
 - `commutation_error`: 1-CM array
-- `idler_response`: Forward idler S-parameters
-- `backward_idler_response`: Backward idler S-parameters (optional)
 - `modes`: List of mode tuples
 - `config`: Stored TWPASimulationConfig (optional)
 - `netlist_name`: Stored netlist name (optional)
+
+**Backward-compatible properties (2-port legacy code):**
+- `S11`, `S12`, `S21`, `S22`: Slices of `S_fund` using port indices 0 and 1. Read-only properties.
+- `idler_response`: Slices `S_harmonic[:, output_port_idx, signal_port_idx, :]`. Read-only property.
+- `backward_idler_response`: Slices `S_harmonic[:, signal_port_idx, output_port_idx, :]`. Read-only property.
 
 **Harmonics Spatial Data (for plotting power along the line):**
 - `pump_nodeflux`: numpy array of pump nodeflux (shape: num_pump_harmonics × num_nodes). Always available.
@@ -207,6 +213,22 @@ Container for simulation results with analysis and visualization.
 - `main_line_node_indices`: numpy array of indices into the sorted nodeflux arrays selecting only main-line nodes (nodes on every path from port 1 to port 2). Side-branch nodes (internal to filters) are excluded. Computed automatically; used by `plot_harmonics()` for cleaner spatial plots.
 
 #### Methods
+
+##### s_param
+```python
+# Get |S_{out,in}|^2 by 1-based port number
+gain = results.s_param(2, 1)           # S21
+reflection = results.s_param(1, 1)     # S11
+cross_port = results.s_param(3, 1)     # S31 (for multi-port devices)
+```
+
+##### s_harmonic
+```python
+# Get |S(mode, out_port, (0,), in_port)|^2 by 1-based port number
+# mode_idx: index into modes list (0 = fundamental, 1 = first harmonic, etc.)
+idler_31 = results.s_harmonic(1, 3, 1)  # 1st harmonic, port 3 out, port 1 in
+```
+Requires nonlinear mode (raises `ValueError` if `S_harmonic` is `None`).
 
 ##### save
 ```python
@@ -388,9 +410,12 @@ results = TWPASimulator().run_full_simulation(
 # Load saved results
 results, metadata = TWPAResults.load("ktwpa_pump9.1GHz_01")
 
-# Access data
-gain_dB = 10*np.log10(results.S21)
+# Access data (new API — works for any port pair)
+gain_dB = 10*np.log10(results.s_param(2, 1))  # S21
 peak_gain = np.max(gain_dB)
+
+# Legacy properties still work for 2-port devices
+gain_dB = 10*np.log10(results.S21)  # equivalent to s_param(2, 1)
 
 # Re-plot with different settings
 fig = results.plot(
@@ -427,7 +452,7 @@ for pump_power in pump_powers:
 
 # Compare gains
 for i, results in enumerate(all_results):
-    max_gain = np.max(10*np.log10(results.S21))
+    max_gain = np.max(10*np.log10(results.s_param(2, 1)))
     print(f"Pump {pump_powers[i]*1e6:.1f} μA: {max_gain:.1f} dB")
 ```
 

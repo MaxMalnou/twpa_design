@@ -4,6 +4,50 @@ Living document tracking design decisions, physical reasoning, and implementatio
 
 ---
 
+## 2026-04-09: Full N-port S-matrix and harmonic extraction
+
+### Context
+
+The julia_wrapper previously extracted only 4 S-parameters (S11, S12, S21, S22) between the user-specified signal and output ports, and plot labels were hardcoded. This was insufficient for multi-port devices like diplexed TWPAs.
+
+### Changes
+
+- **`TWPAResults` dataclass**: Replaced `S11/S12/S21/S22` fields with `S_fund` (3D array: `n_ports x n_ports x n_freqs`) and `S_harmonic` (4D array: `n_modes x n_ports x n_ports x n_freqs`). Backward-compatible `@property` aliases (`S11`, `S12`, `S21`, `S22`, `idler_response`, `backward_idler_response`) preserve existing code.
+- **Extraction**: Single vectorized Julia call `abs2.(S(:, :, (0,), :, :))` replaces 6 individual calls. Returns all modes x all ports x all ports in one shot.
+- **Save/Load**: New `.npz` format stores `S_fund`, `S_harmonic`, `port_count`, `port_numbers`. Legacy files with `S11/S12/S21/S22` keys are detected and reconstructed automatically.
+- **Plot labels**: Dynamic — `|S_{42}|` instead of hardcoded `|S_{21}|`.
+- **Access methods**: `results.s_param(j, k)` for fundamental, `results.s_harmonic(n, j, k)` for harmonics, both 1-based port numbers.
+
+### Implementation choices
+
+- **3D/4D numpy arrays** over nested lists — clean serialization with `npz`, easy slicing.
+- **Port numbers stored explicitly** — handles non-contiguous ports.
+- **Vectorized extraction** exploits JosephsonCircuits.jl KeyedArray support for `:` (Colon) on port dimensions.
+
+---
+
+## 2026-04-09: Peripheral filter builder module
+
+### Context
+
+For diplexed TWPAs and TWPA-TWPA cascades, peripheral filter circuits (diplexers, multiplexers) need to be designed and composed with TWPA netlists into multi-port devices.
+
+### Changes
+
+- **New module `filter_builder.py`** (~3400 lines): Contains g-value computation (Butterworth, Chebyshev Type I), Foster frequency transformations, filter/multiplexer design, netlist generation, standalone response analysis, and topology composition.
+- **`compose_chain()`**: Stitches alternating peripheral and TWPA netlists by stripping ports/resistors, merging junction nodes, and adding fresh external ports with sequential numbering. Connection topology specified via `(out_role, in_role)` tuples.
+- **`save_raw_netlist_to_file()`**: Extracted from `netlist_JC_builder.save_netlist_to_file()` to share the file-writing logic between TWPA netlist builder and filter builder.
+- **Node naming**: String-prefixed nodes (`m1_lp_1`, `m1_hp_2`, `m1_c`) avoid collisions with TWPA integer nodes regardless of TWPA size.
+
+### Implementation choices
+
+- **Single file** rather than 3 separate modules — matches the package convention of one `.py` per concern.
+- **Numeric component values** (not symbolic) — peripheral filters have ~50 components, no parametric reuse needed unlike TWPAs with 2000+ identical cells.
+- **Singly terminated filters** for multiplexer arms — g-values computed with open-circuit load, branch order reversed when building from common node outward so g1 is at the 50 Ohm port end and g_n at the open junction end.
+- **Composition ordering**: Input-side peripherals have their arms reversed in the netlist so components read port-to-junction; output-side peripherals read junction-to-port. The netlist reads naturally from device edge inward and back out.
+
+---
+
 ## 2026-02-09: Harmonics spatial plotting - Node selection
 
 ### Context

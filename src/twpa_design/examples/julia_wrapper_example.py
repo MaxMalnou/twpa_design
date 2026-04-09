@@ -60,6 +60,11 @@ switchofflinesearchtol: Tolerance for switching off linesearch. default: 1e-5
 alphamin: Minimum step size for linesearch. default: 1e-4
 sorting: Node sorting method ('name', 'number', 'none'). default: 'name'
 
+# Data storage options
+store_signal_nodeflux: Store signal nodeflux for harmonics plotting. default: False
+    When True, stores the full 5D signal nodeflux array (modes × nodes × ports × ports × freqs).
+    Required for signal/idler harmonics in plot_harmonics(). Pump harmonics are always available.
+
 Available netlist files:
 - '4wm_jtwpa_2002cells_01.py': Standard 4-wave mixing JTWPA (2002 cells)
 - 'b_jtwpa_1000cells_01.py': Broadband JTWPA with rf-SQUID nonlinearity (500 cells)  

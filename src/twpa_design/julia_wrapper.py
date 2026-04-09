@@ -450,19 +450,34 @@ def build_hblinsolve_string(config: TWPASimulationConfig) -> str:
 
 @dataclass
 class TWPAResults:
-    """Container for TWPA simulation results"""
+    """Container for TWPA simulation results.
+
+    S-parameter data is stored as numpy arrays indexed by port number (0-based):
+      - S_fund[i, j, :] = |S_{port_i+1, port_j+1}|^2 at fundamental mode (n=0)
+      - S_harmonic[m, i, j, :] = |S(mode_m, port_i+1, (0,), port_j+1, :)|^2
+
+    Use s_param(out_port, in_port) for convenient 1-based port access.
+    Legacy properties S11, S12, S21, S22, idler_response, backward_idler_response
+    are provided for backward compatibility with 2-port code.
+    """
     frequencies_GHz: np.ndarray
-    S11: np.ndarray
-    S12: np.ndarray
-    S21: np.ndarray
-    S22: np.ndarray
-    quantum_efficiency: np.ndarray
-    commutation_error: np.ndarray
-    idler_response: np.ndarray
-    backward_idler_response: Optional[np.ndarray] = None
+
+    # Full fundamental-mode S-matrix: shape (n_ports, n_ports, n_freqs)
+    S_fund: np.ndarray
+
+    # Full harmonic S-matrix: shape (n_modes, n_ports, n_ports, n_freqs)
+    # None in linear mode (no mixing products)
+    S_harmonic: Optional[np.ndarray] = None
+
+    quantum_efficiency: np.ndarray = field(default_factory=lambda: np.array([]))
+    commutation_error: np.ndarray = field(default_factory=lambda: np.array([]))
     modes: Optional[List] = None
     netlist_name: Optional[str] = None
     config: Optional[TWPASimulationConfig] = None
+
+    # Port metadata
+    port_count: int = 2
+    port_numbers: Optional[List[int]] = None  # e.g. [1, 2] or [1, 2, 3, 4]
 
     # Pump harmonics data (always available for nonlinear solver)
     pump_nodeflux: Optional[np.ndarray] = None  # Shape: (num_pump_harmonics, num_nodes)
@@ -476,6 +491,76 @@ class TWPAResults:
     num_nodes: Optional[int] = None
     total_cells: Optional[int] = None  # From netlist metadata
     main_line_node_indices: Optional[np.ndarray] = None  # Indices into sorted nodeflux for main-line nodes
+
+    # --- Port index helpers ---
+
+    @property
+    def n_ports(self) -> int:
+        return self.S_fund.shape[0]
+
+    @property
+    def _signal_port_idx(self) -> int:
+        """Index of signal_port in port_numbers list."""
+        if self.config is not None and self.port_numbers is not None:
+            return self.port_numbers.index(self.config.signal_port)
+        return 0
+
+    @property
+    def _output_port_idx(self) -> int:
+        """Index of output_port in port_numbers list."""
+        if self.config is not None and self.port_numbers is not None:
+            return self.port_numbers.index(self.config.output_port)
+        return min(1, self.n_ports - 1)
+
+    def s_param(self, out_port: int, in_port: int) -> np.ndarray:
+        """Get |S_{out_port, in_port}|^2 by 1-based port number."""
+        pn = self.port_numbers or list(range(1, self.n_ports + 1))
+        return self.S_fund[pn.index(out_port), pn.index(in_port), :]
+
+    def s_harmonic(self, mode_idx: int, out_port: int, in_port: int) -> np.ndarray:
+        """Get |S(mode, out_port, (0,), in_port)|^2 by 1-based port number.
+
+        Args:
+            mode_idx: Index into modes list (0 = fundamental, 1 = first harmonic, etc.)
+            out_port: Output port number (1-based)
+            in_port: Input port number (1-based)
+        """
+        if self.S_harmonic is None:
+            raise ValueError("No harmonic S-matrix available (linear mode?)")
+        pn = self.port_numbers or list(range(1, self.n_ports + 1))
+        return self.S_harmonic[mode_idx, pn.index(out_port), pn.index(in_port), :]
+
+    # --- Backward-compatible properties (2-port legacy code) ---
+
+    @property
+    def S11(self) -> np.ndarray:
+        return self.S_fund[0, 0, :]
+
+    @property
+    def S12(self) -> np.ndarray:
+        return self.S_fund[0, 1, :]
+
+    @property
+    def S21(self) -> np.ndarray:
+        return self.S_fund[1, 0, :]
+
+    @property
+    def S22(self) -> np.ndarray:
+        return self.S_fund[1, 1, :]
+
+    @property
+    def idler_response(self) -> np.ndarray:
+        """Forward idlers: S_harmonic[:, output_port_idx, signal_port_idx, :]"""
+        if self.S_harmonic is None:
+            return np.zeros_like(self.frequencies_GHz)
+        return self.S_harmonic[:, self._output_port_idx, self._signal_port_idx, :]
+
+    @property
+    def backward_idler_response(self) -> Optional[np.ndarray]:
+        """Backward idlers: S_harmonic[:, signal_port_idx, output_port_idx, :]"""
+        if self.S_harmonic is None:
+            return None
+        return self.S_harmonic[:, self._signal_port_idx, self._output_port_idx, :]
 
     def save(self, filename: Optional[str] = None,
                 metadata: Optional[dict] = None,
@@ -568,16 +653,14 @@ class TWPAResults:
         # Save the data
         save_dict = {
             'frequencies_GHz': self.frequencies_GHz,
-            'S11': self.S11,
-            'S12': self.S12,
-            'S21': self.S21,
-            'S22': self.S22,
+            'S_fund': self.S_fund,
             'quantum_efficiency': self.quantum_efficiency,
             'commutation_error': self.commutation_error,
-            'idler_response': self.idler_response,
-            'backward_idler_response': self.backward_idler_response,
             'modes': self.modes,
-            'netlist_name': self.netlist_name,  # Save this in the data too
+            'netlist_name': self.netlist_name,
+            # Port metadata
+            'port_count': self.port_count,
+            'port_numbers': np.array(self.port_numbers or []),
             # Pump harmonics data
             'pump_nodeflux': self.pump_nodeflux,
             'num_pump_harmonics': self.num_pump_harmonics,
@@ -587,8 +670,11 @@ class TWPAResults:
             # Spatial info
             'num_nodes': self.num_nodes,
             'total_cells': self.total_cells,
-            'main_line_node_indices': self.main_line_node_indices
+            'main_line_node_indices': self.main_line_node_indices,
         }
+        # Only save harmonic matrix if present (not in linear mode)
+        if self.S_harmonic is not None:
+            save_dict['S_harmonic'] = self.S_harmonic
         
         # Add metadata if provided
         if metadata is not None:
@@ -602,6 +688,28 @@ class TWPAResults:
         
         return filename
         
+    @staticmethod
+    def _safe_int(val):
+        """Safely convert a value to int, handling numpy arrays wrapping None."""
+        if val is None:
+            return None
+        try:
+            v = val.item() if hasattr(val, 'item') else val
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_float(val):
+        """Safely convert a value to float, handling numpy arrays wrapping None."""
+        if val is None:
+            return None
+        try:
+            v = val.item() if hasattr(val, 'item') else val
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     @classmethod
     def load(cls, filename: str) -> Tuple['TWPAResults', dict]:
         """Load TWPA results and metadata from file
@@ -645,32 +753,72 @@ class TWPAResults:
                     return val
             return None
 
+        # Detect file format: new files have 'S_fund', legacy files have 'S11'
+        if 'S_fund' in data:
+            # --- New format ---
+            S_fund = data['S_fund']
+            S_harmonic = get_array_or_none('S_harmonic')
+            pc = int(data['port_count']) if 'port_count' in data else S_fund.shape[0]
+            pn_arr = data['port_numbers'] if 'port_numbers' in data else None
+            pn = pn_arr.tolist() if pn_arr is not None and len(pn_arr) > 0 else list(range(1, pc + 1))
+        else:
+            # --- Legacy format: reconstruct from S11/S12/S21/S22 ---
+            n_freqs = len(data['frequencies_GHz'])
+            sp = metadata.get('signal_port', 1)
+            op = metadata.get('output_port', 2)
+            pc = 2
+            pn = sorted([sp, op]) if sp != op else [sp]
+            if len(pn) == 1:
+                pn = [1, 2]  # fallback for reflection amp legacy files
+
+            S_fund = np.zeros((2, 2, n_freqs))
+            # Place at correct physical port indices
+            sp_idx, op_idx = pn.index(sp), pn.index(op)
+            S_fund[sp_idx, sp_idx, :] = data['S11']
+            S_fund[op_idx, op_idx, :] = data['S22']
+            S_fund[op_idx, sp_idx, :] = data['S21']
+            S_fund[sp_idx, op_idx, :] = data['S12']
+
+            # Reconstruct S_harmonic from idler_response / backward_idler_response
+            idler_data = get_array_or_none('idler_response')
+            backward_data = get_array_or_none('backward_idler_response')
+            S_harmonic = None
+            if idler_data is not None and idler_data.ndim == 2:
+                # Normalize to (n_modes, n_freqs)
+                if idler_data.shape[0] == n_freqs:
+                    idler_data = idler_data.T
+                n_modes = idler_data.shape[0]
+                S_harmonic = np.zeros((n_modes, 2, 2, n_freqs))
+                S_harmonic[:, op_idx, sp_idx, :] = idler_data
+                if backward_data is not None:
+                    if backward_data.shape[0] == n_freqs:
+                        backward_data = backward_data.T
+                    S_harmonic[:, sp_idx, op_idx, :] = backward_data
+
         # Create TWPAResults instance
         results = cls(
             frequencies_GHz=data['frequencies_GHz'],
-            S11=data['S11'],
-            S12=data['S12'],
-            S21=data['S21'],
-            S22=data['S22'],
+            S_fund=S_fund,
+            S_harmonic=S_harmonic,
             quantum_efficiency=data['quantum_efficiency'],
             commutation_error=data['commutation_error'],
-            idler_response=data['idler_response'],
-            backward_idler_response=get_array_or_none('backward_idler_response'),
             modes=data['modes'].tolist() if 'modes' in data else None,
             netlist_name=data.get('netlist_name', metadata.get('netlist_name', None)),
-            config=config,  # Reconstructed config
+            config=config,
+            port_count=pc,
+            port_numbers=pn,
             # Pump harmonics data
             pump_nodeflux=get_array_or_none('pump_nodeflux'),
-            num_pump_harmonics=int(data['num_pump_harmonics']) if 'num_pump_harmonics' in data and data['num_pump_harmonics'] is not None else None,
-            pump_freq_Hz=float(data['pump_freq_Hz']) if 'pump_freq_Hz' in data and data['pump_freq_Hz'] is not None else None,
+            num_pump_harmonics=cls._safe_int(data.get('num_pump_harmonics')),
+            pump_freq_Hz=cls._safe_float(data.get('pump_freq_Hz')),
             # Signal harmonics data
             signal_nodeflux=get_array_or_none('signal_nodeflux'),
             # Spatial info
-            num_nodes=int(data['num_nodes']) if 'num_nodes' in data and data['num_nodes'] is not None else None,
-            total_cells=int(data['total_cells']) if 'total_cells' in data and data['total_cells'] is not None else None,
+            num_nodes=cls._safe_int(data.get('num_nodes')),
+            total_cells=cls._safe_int(data.get('total_cells')),
             main_line_node_indices=get_array_or_none('main_line_node_indices')
         )
-        
+
         return results, metadata
     
 
@@ -708,23 +856,14 @@ class TWPAResults:
         amp_type = "Reflection Amplifier (PA)" if is_reflection_amp else "Transmission Amplifier (TWPA)"
         
         # Determine which S-parameter represents the gain
+        sp = config_to_use.signal_port
+        op = config_to_use.output_port
         if is_reflection_amp:
-            if config_to_use.signal_port == 1:
-                gain_param = "S11"
-                gain_data = self.S11
-            else:
-                gain_param = "S22"
-                gain_data = self.S22
+            gain_param = f"S{sp}{sp}"
+            gain_data = self.S_fund[self._signal_port_idx, self._signal_port_idx, :]
         else:
-            if config_to_use.signal_port == 1 and config_to_use.output_port == 2:
-                gain_param = "S21"
-                gain_data = self.S21
-            elif config_to_use.signal_port == 2 and config_to_use.output_port == 1:
-                gain_param = "S12"
-                gain_data = self.S12
-            else:
-                gain_param = "S21"
-                gain_data = self.S21
+            gain_param = f"S{op}{sp}"
+            gain_data = self.S_fund[self._output_port_idx, self._signal_port_idx, :]
         
         print(f"=== Plotting Amplifier Performance ===")
         print(f"Amplifier type: {amp_type}")
@@ -811,26 +950,49 @@ class TWPAResults:
         return fig
 
     def _plot_s_parameters(self, ax: Axes, config: TWPASimulationConfig):
-        """Plot S-parameters subplot"""
-        ax.plot(self.frequencies_GHz, 10*np.log10(self.S21), color=blue, linewidth=linewidth)
-        ax.plot(self.frequencies_GHz, 10*np.log10(self.S12), color=red, linewidth=linewidth)
-        ax.plot(self.frequencies_GHz, 10*np.log10(self.S11), color=green, linewidth=linewidth, alpha=0.7)
-        ax.plot(self.frequencies_GHz, 10*np.log10(self.S22), color=orange, linewidth=linewidth, alpha=0.7)
-        
+        """Plot S-parameters subplot with dynamic port labels."""
+        sp = config.signal_port
+        op = config.output_port
+        pn = self.port_numbers or list(range(1, self.n_ports + 1))
+
+        # Define the S-params to plot: (out_port, in_port, color, alpha)
+        # For 2-port: gain, reverse, input reflection, output reflection
+        # For N-port: loop all pairs
+        if self.n_ports <= 2:
+            entries = [
+                (op, sp, blue,   1.0),   # gain direction
+                (sp, op, red,    1.0),   # reverse
+                (sp, sp, green,  0.7),   # input reflection
+                (op, op, orange, 0.7),   # output reflection
+            ]
+        else:
+            all_colors = [blue, red, green, orange, purple, brown, gray]
+            entries = []
+            for i, out_p in enumerate(pn):
+                for j, in_p in enumerate(pn):
+                    c_idx = (i * len(pn) + j) % len(all_colors)
+                    alpha = 0.7 if out_p == in_p else 1.0
+                    entries.append((out_p, in_p, all_colors[c_idx], alpha))
+
+        handles = []
+        for out_p, in_p, color, alpha in entries:
+            data_dB = 10 * np.log10(self.s_param(out_p, in_p))
+            label = rf'$|S_{{{out_p}{in_p}}}|$'
+            ax.plot(self.frequencies_GHz, data_dB,
+                    color=color, linewidth=linewidth, alpha=alpha)
+            handles.append(Line2D([0], [0], color=color, linewidth=linewidth,
+                                  alpha=alpha, label=label))
+
         # Add vertical line at pump frequency
         ax.axvline(config.pump_freq_GHz, color=purple, linestyle=':', alpha=0.5)
-        
-        # Create legend handles
-        s21_handle = Line2D([0], [0], color=blue, linewidth=linewidth, label=r'$|S_{21}|$')
-        s12_handle = Line2D([0], [0], color=red, linewidth=linewidth, label=r'$|S_{12}|$')
-        s11_handle = Line2D([0], [0], color=green, linewidth=linewidth, alpha=0.7, label=r'$|S_{11}|$')
-        s22_handle = Line2D([0], [0], color=orange, linewidth=linewidth, alpha=0.7, label=r'$|S_{22}|$')
-        pump_handle = Line2D([0], [0], color=purple, linestyle=':', alpha=0.5, 
-                            label=rf'$f_a = {config.pump_freq_GHz}$ GHz' + '\n' + 
+        pump_handle = Line2D([0], [0], color=purple, linestyle=':', alpha=0.5,
+                            label=rf'$f_a = {config.pump_freq_GHz}$ GHz' + '\n' +
                                   rf'$I_a = {config.pump_current_A*1e6:.1f}$ $\mu$A')
-        
+        handles.append(pump_handle)
+
+        n_cols = 2 if self.n_ports <= 2 else 3
         ax.legend(
-            handles=[s21_handle, s11_handle, pump_handle, s12_handle, s22_handle],
+            handles=handles,
             loc='lower right',
             fontsize=fontsize_legend,
             frameon=True,
@@ -842,10 +1004,10 @@ class TWPAResults:
             handlelength=1.5,
             handletextpad=0.5,
             borderaxespad=0.5,
-            ncol=2,
-            columnspacing=-3.5
+            ncol=n_cols,
+            columnspacing=-3.5 if n_cols == 2 else 1.0
         )
-        
+
         ax.set_ylabel(r'$|S|$-parameters [dB]', fontsize=fontsize)
         ax.set_title('Signal', fontsize=fontsize_title)
         ax.grid(True, alpha=0.3)
@@ -857,8 +1019,8 @@ class TWPAResults:
 
     def _plot_forward_idlers(self, ax: Axes, config: TWPASimulationConfig, max_mode_order: int = 2):
         """Plot forward idlers subplot"""
-        if self.idler_response.ndim > 1 and self.idler_response.shape[0] > 1:
-            idler_data = self.idler_response
+        if self.S_harmonic is not None and self.S_harmonic.shape[0] > 1:
+            idler_data = self.idler_response  # property: S_harmonic[:, op, sp, :]
             
             # Determine shape and orientation
             if idler_data.shape[0] == len(self.frequencies_GHz):
@@ -911,7 +1073,6 @@ class TWPAResults:
                 ax.plot(self.frequencies_GHz, idler_response_dB, 
                        linewidth=linewidth, color=color, label=label)
         
-        # ax.set_ylabel(rf'$S_{{{config.output_port}{config.signal_port}}}$ [dB]', fontsize=fontsize)
         ax.set_ylabel(rf'$|S_{{{config.output_port}{config.signal_port}}}|(\mathrm{{sig}}\rightarrow\mathrm{{idl}})$ [dB]', fontsize=fontsize)
         ax.set_title('Forward Idlers', fontsize=fontsize_title)
         ax.grid(True, alpha=0.3)
@@ -924,8 +1085,8 @@ class TWPAResults:
 
     def _plot_backward_idlers(self, ax: Axes, config: TWPASimulationConfig, max_mode_order: int = 2):
         """Plot backward idlers subplot"""
-        if self.backward_idler_response is not None and self.backward_idler_response.ndim > 1:
-            backward_idler_data = self.backward_idler_response
+        if self.S_harmonic is not None and self.S_harmonic.shape[0] > 1:
+            backward_idler_data = self.backward_idler_response  # property
             
             # Use same mode mapping as forward idlers
             if self.modes is not None:
@@ -993,7 +1154,6 @@ class TWPAResults:
             ax.text(0.5, 0.5, 'Backward idler data not available', 
                    transform=ax.transAxes, ha='center', va='center')
         
-        # ax.set_ylabel(rf'$S_{{{config.signal_port}{config.output_port}}}$ [dB]', fontsize=fontsize)
         ax.set_ylabel(rf'$|S_{{{config.signal_port}{config.output_port}}}|(\mathrm{{sig}}\rightarrow\mathrm{{idl}})$ [dB]', fontsize=fontsize)
         ax.set_title('Backward Idlers', fontsize=fontsize_title)
         ax.grid(True, alpha=0.3)
@@ -1426,9 +1586,11 @@ class TWPASimulator:
         self.netlist_has_loss = False
         self.netlist_loss_tangent = 0.0
         self.component_count = 0
-        
+
         # Circuit state
         self.circuit_ready = False
+        self.port_count = 0
+        self.port_numbers = []
         
     ##################################################################################        
 
@@ -1683,6 +1845,15 @@ class TWPASimulator:
             if self.netlist_has_loss:
                 print(f"  Dielectric loss: tan δ = {self.netlist_loss_tangent}")
             self.circuit_ready = True
+
+            # Discover port count from netlist
+            port_numbers = sorted(set(
+                int(value) for name, _, _, value in self.jc_components
+                if name.startswith('P')
+            ))
+            self.port_count = len(port_numbers)
+            self.port_numbers = port_numbers
+            print(f"  Ports: {self.port_numbers} ({self.port_count} total)")
         else:
             self.circuit_ready = False
 
@@ -1903,7 +2074,8 @@ class TWPASimulator:
         # Determine amplifier type
         is_reflection_amp = (config.signal_port == config.output_port)
         amp_type = "Reflection (PA)" if is_reflection_amp else "Transmission (TWPA)"
-        gain_param = "S11" if is_reflection_amp else "S21"
+        sp, op = config.signal_port, config.output_port
+        gain_param = f"S{sp}{sp}" if is_reflection_amp else f"S{op}{sp}"
         
         print(f"Detected amplifier type: {amp_type}")
         print(f"Will analyze gain using: {gain_param}")
@@ -2025,33 +2197,57 @@ class TWPASimulator:
         # hblinsolve returns LinearizedHB directly -> access via sol
         result_path = "sol" if config.solver_mode == "linear" else "sol.linearized"
 
-        # Helper function to extract S-parameters
-        def extract_s_param(out_port, out_mode, in_port, in_mode):
-            assert self.jl is not None, "Failed to get Julia instance"
-            return np.array(self.jl.eval(f'''
-            abs2.({result_path}.S(
-                outputmode={out_mode},
-                outputport={out_port},
-                inputmode={in_mode},
-                inputport={in_port},
-                freqindex=:))
-            '''))
-        
-        print("  Extracting S-parameters...")
-        S21 = extract_s_param(config.output_port, (0,), config.signal_port, (0,))
-        S12 = extract_s_param(config.signal_port, (0,), config.output_port, (0,))
-        S11 = extract_s_param(config.signal_port, (0,), config.signal_port, (0,))
-        S22 = extract_s_param(config.output_port, (0,), config.output_port, (0,))
+        # Extract full S-matrix in a single vectorized Julia call.
+        # S(:, :, (0,), :, :) returns all output modes × all output ports ×
+        # all input ports × all frequencies for input mode (0,).
+        n_ports = self.port_count
+        n_freqs = len(frequencies_GHz)
+        port_numbers = list(self.port_numbers)
 
-        # In linear mode, skip QE/CM/idler extraction (not computed)
+        print(f"  Extracting full S-matrix ({n_ports} ports)...")
+        try:
+            S_all = np.array(self.jl.eval(
+                f"abs2.({result_path}.S(:, :, (0,), :, :))"
+            ))
+            # S_all shape: (n_modes, n_ports, n_ports, n_freqs)
+            S_fund = S_all[0, :, :, :]   # fundamental mode (n=0)
+            print(f"    S_all shape: {S_all.shape}")
+        except Exception as e:
+            print(f"    Warning: Vectorized S extraction failed ({e}), falling back to per-element")
+            # Fallback: extract element by element
+            def extract_s_param(out_port, out_mode, in_port, in_mode):
+                assert self.jl is not None
+                return np.array(self.jl.eval(f'''
+                abs2.({result_path}.S(
+                    outputmode={out_mode},
+                    outputport={out_port},
+                    inputmode={in_mode},
+                    inputport={in_port},
+                    freqindex=:))
+                '''))
+            S_fund = np.zeros((n_ports, n_ports, n_freqs))
+            for i, out_p in enumerate(port_numbers):
+                for j, in_p in enumerate(port_numbers):
+                    S_fund[i, j, :] = extract_s_param(out_p, (0,), in_p, (0,))
+            S_all = None  # no harmonic data in fallback
+
+        # In linear mode, skip QE/CM/harmonic extraction (not computed)
         if config.solver_mode == "linear" and config.Nmodulationharmonics == 0:
-            print("  Linear mode: Using placeholder values for QE, CM, and idlers")
-            QE = np.ones_like(S21)  # Placeholder
-            CM_error = np.zeros_like(S21)  # Placeholder
-            idler = np.zeros_like(S21)
-            backward_idler = None
-            modes = [(0,)]  # Only fundamental mode
+            print("  Linear mode: Using placeholder values for QE and CM")
+            QE = np.ones(n_freqs)
+            CM_error = np.zeros(n_freqs)
+            S_harmonic = None
+            modes = [(0,)]
         else:
+            # S_harmonic is the full S_all from the vectorized call
+            S_harmonic = S_all  # (n_modes, n_ports, n_ports, n_freqs)
+
+            # Get modes list for labeling
+            try:
+                modes = list(self.jl.eval(f"{result_path}.modes"))
+            except:
+                modes = None
+
             # Quantum efficiency
             print("  Extracting quantum efficiency...")
             try:
@@ -2061,7 +2257,7 @@ class TWPASimulator:
                 '''))
             except:
                 print("    Warning: Could not extract QE")
-                QE = np.ones_like(S21)
+                QE = np.ones(n_freqs)
 
             # Commutation relation error
             print("  Extracting commutation relation error...")
@@ -2069,29 +2265,7 @@ class TWPASimulator:
                 CM_error = np.array(self.jl.eval(f'1 .- {result_path}.CM((0,),{config.output_port},:)'))
             except:
                 print("    Warning: Could not extract CM")
-                CM_error = np.zeros_like(S21)
-
-            # Idler response
-            print("  Extracting idler response...")
-            try:
-                idler = np.array(self.jl.eval(f"abs2.({result_path}.S(:,{config.output_port},(0,),{config.signal_port},:)')"))
-            except:
-                print("    Warning: Could not extract full idler response, using simplified version")
-                idler = np.zeros_like(S21)
-
-            # Backward idler response
-            print("  Extracting backward idler response...")
-            try:
-                backward_idler = np.array(self.jl.eval(f"abs2.({result_path}.S(:,{config.signal_port},(0,),{config.output_port},:)')"))
-            except:
-                print("    Warning: Could not extract backward idler response")
-                backward_idler = None
-
-            # Get modes
-            try:
-                modes = list(self.jl.eval(f"{result_path}.modes"))
-            except:
-                modes = None
+                CM_error = np.zeros(n_freqs)
 
         # Helper: get node sort index from Julia keyed array or from netlist
         def _get_node_sort_idx(jl_nodeflux_expr, num_nodes):
@@ -2218,14 +2392,15 @@ class TWPASimulator:
 
         return TWPAResults(
             frequencies_GHz=frequencies_GHz,
-            S11=S11, S12=S12, S21=S21, S22=S22,
+            S_fund=S_fund,
+            S_harmonic=S_harmonic,
             quantum_efficiency=QE,
             commutation_error=CM_error,
-            idler_response=idler,
-            backward_idler_response=backward_idler,
             modes=modes,
             netlist_name=self.current_netlist_name,
             config=config,
+            port_count=n_ports,
+            port_numbers=port_numbers,
             pump_nodeflux=pump_nodeflux,
             num_pump_harmonics=num_pump_harmonics,
             pump_freq_Hz=pump_freq_Hz,
@@ -2235,17 +2410,16 @@ class TWPASimulator:
             main_line_node_indices=main_line_node_indices
         )
 
-    def _display_quick_results(self, results: TWPAResults, config: TWPASimulationConfig, 
+    def _display_quick_results(self, results: TWPAResults, config: TWPASimulationConfig,
                             amp_type: str, gain_param: str):
         """Display quick summary of results."""
-        # Determine correct gain data
+        # Determine correct gain data using port indices
+        sp_idx = results._signal_port_idx
+        op_idx = results._output_port_idx
         if config.signal_port == config.output_port:  # Reflection amp
-            gain_data = results.S11 if config.signal_port == 1 else results.S22
+            gain_data = results.S_fund[sp_idx, sp_idx, :]
         else:  # Transmission amp
-            if config.signal_port == 1 and config.output_port == 2:
-                gain_data = results.S21
-            else:
-                gain_data = results.S12
+            gain_data = results.S_fund[op_idx, sp_idx, :]
         
         max_gain_dB = 10*np.log10(np.max(gain_data))
         max_gain_idx = np.argmax(gain_data)
@@ -2268,7 +2442,7 @@ class TWPASimulator:
 
     def run_full_simulation(self, netlist_name: str, config: TWPASimulationConfig,
                            verbose: bool = True, force_julia_reinit: bool = False,
-                           save_results: bool = True, show_plot: bool = True,
+                           save_results: bool = False, show_plot: bool = True,
                            max_mode_order_to_plot: int = 2,
                            output_dir: Optional[str] = None) -> TWPAResults:
         """
@@ -2355,13 +2529,20 @@ class TWPASimulator:
             results = self.run_simulation(config)
             
             # Success summary
-            max_gain = np.max(results.S21)
-            max_gain_dB = 10*np.log10(max_gain)
-            
+            sp_idx = results._signal_port_idx
+            op_idx = results._output_port_idx
+            if config.signal_port == config.output_port:
+                gain_data = results.S_fund[sp_idx, sp_idx, :]
+                gain_label = f"S{config.signal_port}{config.signal_port}"
+            else:
+                gain_data = results.S_fund[op_idx, sp_idx, :]
+                gain_label = f"S{config.output_port}{config.signal_port}"
+            max_gain_dB = 10*np.log10(np.max(gain_data))
+
             if verbose:
                 print(f"\n🎯 Simulation completed successfully!")
             else:
-                print(f"✅ Simulation complete: Max S21 gain = {max_gain_dB:.1f} dB")
+                print(f"✅ Simulation complete: Max {gain_label} gain = {max_gain_dB:.1f} dB")
             
             # Save results if requested
             if save_results:
@@ -2374,7 +2555,9 @@ class TWPASimulator:
                     print(f"📊 Data saved to: {data_filename}")
 
                 # Save plot (.svg file) and optionally display it
-                results.plot(config=config, netlist_name=netlist_name, auto_save=True, show_plot=show_plot, max_mode_order_to_plot=max_mode_order_to_plot, output_dir=output_dir)
+                fig = results.plot(config=config, netlist_name=netlist_name, auto_save=True, show_plot=show_plot, max_mode_order_to_plot=max_mode_order_to_plot, output_dir=output_dir)
+                if not show_plot:
+                    plt.close(fig)  # Prevent figure from leaking into later plt.show() calls
                 if verbose:
                     if show_plot:
                         print(f"📈 Plot saved and displayed")

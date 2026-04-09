@@ -1827,42 +1827,46 @@ def build_netlist(prepared_data: Dict) -> Tuple[JCNetlistBuilder, Dict[str, Any]
     return builder, stats
 
 
-def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: Dict[str, Any]):
-    """Save netlist to Python file (Cell 7 from notebook).
-    
+def save_raw_netlist_to_file(jc_components: list, circuit_parameters: dict,
+                            metadata: Dict[str, Any], output_file: str):
+    """Save raw netlist data to a Python file readable by julia_wrapper.
+
+    This is the low-level save function that writes jc_components,
+    circuit_parameters, and metadata to a .py file. It can be called
+    directly with raw data (e.g. from filter_builder.compose_chain)
+    or indirectly via save_netlist_to_file (which extracts data from
+    a JCNetlistBuilder first).
+
     Parameters
     ----------
-    builder : JCNetlistBuilder
-        Builder with completed netlist
-    output_file : str
-        Output filename (full path)
+    jc_components : list
+        List of (name, node1, node2, value) tuples.
+    circuit_parameters : dict
+        Parameter name -> value mapping.
     metadata : dict
-        Metadata to include in file (device_name, etc.)
+        Metadata to include in file (device_name, etc.).
+    output_file : str
+        Output filename (full path).
     """
     from datetime import datetime
-    
-    # Get netlist data from builder
-    jc_components = builder.get_netlist_tuples()
-    circuit_parameters = builder.get_used_parameters()  # Only get parameters actually used
-    
-    # Add component and parameter counts to metadata
+
     metadata['component_count'] = len(jc_components)
     metadata['parameter_count'] = len(circuit_parameters)
     metadata['generated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
+
     with open(output_file, 'w') as f:
         # Write header comment
         f.write(f"# JC netlist for {metadata.get('device_name', 'TWPA')}\n")
         f.write(f"# Generated: {metadata['generated']}\n")
         f.write(f"# Components: {len(jc_components)}\n")
         f.write(f"# Parameters: {len(circuit_parameters)}\n\n")
-        
+
         # Write components
         f.write("jc_components = [\n")
         for comp in jc_components:
             f.write(f'    {comp},\n')
         f.write("]\n\n")
-        
+
         # Write parameters
         f.write("circuit_parameters = {\n")
         for param, value in sorted(circuit_parameters.items()):
@@ -1873,13 +1877,10 @@ def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: 
                 # Write as complex value in Julia-compatible format
                 loss_tan = metadata.get('loss_tangent', 0.0)
                 if isinstance(value, (int, float)):
-                    # Format as Julia complex number: value/(1+im*tandelta)
                     f.write(f'    "{param}": "{value:.6e}/(1+{loss_tan:.6e}im)",\n')
                 else:
-                    # Handle array values if needed
                     f.write(f'    "{param}": "{value}/(1+{loss_tan:.6e}im)",\n')
             else:
-                # Non-capacitor parameters or loss disabled
                 if isinstance(value, (int, float)):
                     f.write(f'    "{param}": {value:.6e},\n')
                 elif isinstance(value, np.ndarray):
@@ -1890,7 +1891,7 @@ def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: 
                 else:
                     f.write(f'    "{param}": {repr(value)},\n')
         f.write("}\n\n")
-        
+
         # Write metadata
         f.write("metadata = {\n")
         for key, value in metadata.items():
@@ -1899,11 +1900,28 @@ def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: 
             else:
                 f.write(f'    "{key}": {value},\n')
         f.write("}\n")
-    
+
     print(f"✓ Saved netlist: {output_file}")
     print(f"  Components: {len(jc_components)}")
     print(f"  Parameters: {len(circuit_parameters)}")
     print(f"  Metadata keys: {list(metadata.keys())}")
+
+
+def save_netlist_to_file(builder: JCNetlistBuilder, output_file: str, metadata: Dict[str, Any]):
+    """Save netlist from a JCNetlistBuilder to Python file.
+
+    Parameters
+    ----------
+    builder : JCNetlistBuilder
+        Builder with completed netlist
+    output_file : str
+        Output filename (full path)
+    metadata : dict
+        Metadata to include in file (device_name, etc.)
+    """
+    jc_components = builder.get_netlist_tuples()
+    circuit_parameters = builder.get_used_parameters()
+    save_raw_netlist_to_file(jc_components, circuit_parameters, metadata, output_file)
 
 
 def build_netlist_from_config(netlist_config: NetlistConfig) -> str:

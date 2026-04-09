@@ -23,6 +23,12 @@ dev = [
     "pylint",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests that require Julia (deselect with '-m \"not slow\"')",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
