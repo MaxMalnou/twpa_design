@@ -332,6 +332,17 @@ try:
     ax2.xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
     ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
 
+    # Save results and plot
+    save_plot = True
+    results.save(config=sim_config)
+    if save_plot:
+        from twpa_design import RESULTS_DIR
+        from twpa_design.helper_functions import filecounter
+        plot_pattern = f"{RESULTS_DIR}/{output_name}_pump{sim_config.pump_freq_GHz:.2f}GHz_*.svg"
+        plot_filename, plot_number = filecounter(plot_pattern)
+        fig.savefig(plot_filename, format='svg', bbox_inches='tight')
+        print(f"📈 Plot saved to: {plot_filename}")
+
     plt.show()
 
     print(f"\n🎯 TWPA-TWPA simulation complete!")

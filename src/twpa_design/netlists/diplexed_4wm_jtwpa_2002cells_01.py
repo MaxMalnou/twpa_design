@@ -1,5 +1,5 @@
 # JC netlist for diplexed_4wm_jtwpa_2002cells_01
-# Generated: 2026-04-09 11:21:51
+# Generated: 2026-04-09 16:47:30
 # Components: 6478
 # Parameters: 7
 
@@ -6505,5 +6505,5 @@ metadata = {
     "twpa_netlist": "4wm_jtwpa_2002cells_01",
     "component_count": 6478,
     "parameter_count": 7,
-    "generated": "2026-04-09 11:21:51",
+    "generated": "2026-04-09 16:47:30",
 }
