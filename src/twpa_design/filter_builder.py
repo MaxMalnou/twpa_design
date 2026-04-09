@@ -2767,6 +2767,284 @@ def design_multiplexer(arm_specs: List[FilterSpec],
     return MultiplexerDesign(arms=arms, Z0=Z0, label=label)
 
 
+def design_double_open_filter(response: str = 'hp',
+                              total_order: int = 20,
+                              fc: float = 8e9,
+                              approx: str = 'butterworth',
+                              Z0: float = 50.0,
+                              foster_form: int = 1,
+                              reference_order: int = 25,
+                              n_edge: int = 3,
+                              label: str = 'hp_center') -> FilterDesign:
+    """Design a doubly open-terminated filter for the TWPA-TWPA center section.
+
+    This filter connects two diplexer common ports (both reactive/open-ended).
+    It is built by taking the last few g-values from a high-order singly-
+    terminated prototype (which capture the open-end impedance transition)
+    and mirroring them, with the most converged value extended in the middle.
+
+    For a reference filter with g-values [..., g23, g24, g25, inf], using
+    n_edge=3 produces:
+        [g25, g24, g23, g23, ..., g23, g24, g25]
+    where the number of g23's controls the total filter order.
+
+    Parameters
+    ----------
+    response : str
+        Filter response: 'hp', 'lp', 'bp', or 'bs'. Default 'hp'.
+    total_order : int
+        Total number of reactive elements. Must be even (symmetric).
+    fc : float
+        Cutoff/center frequency in Hz.
+    approx : str
+        'butterworth'. Note: 'chebyshev1' g-values oscillate and don't
+        converge, so this method is not well-suited for Chebyshev.
+    Z0 : float
+        Reference impedance in Ohms.
+    foster_form : int
+        Foster canonical form (1 or 2).
+    reference_order : int
+        Order of the singly-terminated reference filter. Max ~25 for
+        numerical stability. Default 25.
+    n_edge : int
+        Number of g-values from the open end to use as the edge transition.
+        Default 3 (uses the last 3 reactive g-values from the reference).
+    label : str
+        Label for the filter. Default 'hp_center'.
+
+    Returns
+    -------
+    FilterDesign
+
+    Notes
+    -----
+    See engineering_notes.md for the design rationale and comparison with
+    the immittance inverter approach.
+    """
+    # Odd order recommended for HP: both ends are series caps (same element type)
+    # Even order also works but ends have different element types
+    if total_order < 2 * n_edge:
+        raise ValueError(f"total_order ({total_order}) must be >= 2 * n_edge ({2 * n_edge})")
+
+    # Compute reference singly-terminated g-values
+    g_ref = calculate_g_values(
+        filter_type=approx,
+        order=reference_order,
+        termination='single',
+    )
+
+    # Extract edge g-values: the last n_edge reactive values before g_{n+1}=inf
+    # g_ref = [g0=1, g1, ..., g_N, inf] -> reactive = g_ref[1:-1]
+    reactive = g_ref[1:-1]  # length = reference_order
+
+    # Edge values: reactive[-n_edge:] = [g_{N-n_edge+1}, ..., g_N]
+    # e.g. for N=25, n_edge=3: [g23, g24, g25]
+    edge = list(reactive[-n_edge:])
+    interior_val = edge[0]  # most converged value (e.g. g23 ≈ 1.94)
+
+    # Build symmetric g-values:
+    # Even: [g_N, ..., interior, interior, ..., g_N]  (total_order elements)
+    # Odd:  [g_N, ..., interior, center, interior, ..., g_N]  (total_order elements)
+    half_order = total_order // 2
+    n_middle = half_order - n_edge
+    if n_middle < 0:
+        n_middle = 0
+    one_side = [interior_val] * n_middle + edge  # [..., g23, g24, g25]
+
+    if total_order % 2 == 0:
+        # Even: mirror directly
+        symmetric_g = list(reversed(one_side)) + one_side
+    else:
+        # Odd: mirror with a single center element
+        symmetric_g = list(reversed(one_side)) + [interior_val] + one_side
+
+    # Wrap as standard format: [g0=1, g1, ..., g_n, g_{n+1}=1]
+    # Both ends are open in reality, but we use g0=g_{n+1}=1 for the
+    # frequency transformation (terminations handled by the topology)
+    g_full = [1.0] + symmetric_g + [1.0]
+
+    # Create spec
+    spec = FilterSpec(
+        response=response,
+        order=total_order,
+        fc=fc,
+        approx=approx,
+        Z0=Z0,
+        termination='double',
+        foster_form=foster_form,
+        label=label,
+    )
+
+    # Frequency transformation
+    f_zeros, f_poles, zero_at_zero = _response_to_zeros_poles(spec)
+    fc_GHz = fc / 1e9
+    f_zeros_GHz = f_zeros / 1e9
+    f_poles_GHz = f_poles / 1e9
+
+    result = frequency_transfo(
+        g_full, f_zeros_GHz, f_poles_GHz,
+        Z0_ohm=Z0,
+        fc=fc_GHz,
+        foster_form=foster_form,
+        zero_at_zero=zero_at_zero,
+        units='GHz',
+    )
+
+    return FilterDesign(spec=spec, g_values=g_full, transfo_result=result)
+
+
+def build_reflectionless_filter(through_design: FilterDesign,
+                                dump_design: Optional[FilterDesign] = None,
+                                Z0: float = 50.0,
+                                prefix: str = 'nrf') -> PeripheralNetlist:
+    """Build a reflectionless (absorptive) filter as a 2-port block.
+
+    Creates a 2-port device with:
+    - A through-path filter between port 1 and port 2 (passes desired band)
+    - Complementary dump filters + loads at each port node (absorbs rejected band)
+
+    For example, an HP through-path with LP dumps creates a reflectionless
+    HP filter: above cutoff the signal passes through, below cutoff it is
+    absorbed into the LP loads instead of being reflected.
+
+    If dump_design is None, simple resistive loads (Z0 to ground) are used
+    instead of filter + load paths.
+
+    Parameters
+    ----------
+    through_design : FilterDesign
+        The main through-path filter (e.g., HP from design_double_open_filter).
+    dump_design : FilterDesign, optional
+        Complementary filter for the dump paths (e.g., LP). If None, uses
+        bare Z0 resistors to ground.
+    Z0 : float
+        Load impedance for dump termination. Default 50.
+    prefix : str
+        Node name prefix. Default 'nrf'.
+
+    Returns
+    -------
+    PeripheralNetlist
+        A 2-port block with port_map {'input': (1, ...), 'output': (2, ...)}.
+    """
+    components = []
+    comp_counter = [0]
+    node_counter = [0]
+
+    # Junction nodes where the block connects to external circuits
+    in_node = f"{prefix}_in"
+    out_node = f"{prefix}_out"
+
+    # --- Through-path filter: in_node -> ... -> out_node ---
+    through_result = through_design.transfo_result
+    foster_form = through_result.get('foster_form', through_design.spec.foster_form)
+    through_series = through_result.get('series', [])
+    through_shunt = through_result.get('shunt', [])
+
+    hp_prefix = f"{prefix}_hp"
+    current_node = in_node
+    s_idx = 0
+    h_idx = 0
+    total_branches = len(through_series) + len(through_shunt)
+
+    for i in range(total_branches):
+        if i % 2 == 0 and s_idx < len(through_series):
+            comps, in_n, out_n = _branch_to_components(
+                through_series[s_idx], 'series', foster_form,
+                hp_prefix, node_counter, comp_counter
+            )
+            comps = _merge_nodes_list(comps, in_n, current_node)
+            components.extend(comps)
+            current_node = out_n
+            s_idx += 1
+        elif h_idx < len(through_shunt):
+            comps, in_n, out_n = _branch_to_components(
+                through_shunt[h_idx], 'shunt', foster_form,
+                hp_prefix, node_counter, comp_counter
+            )
+            comps = _merge_nodes_list(comps, in_n, current_node)
+            components.extend(comps)
+            h_idx += 1
+
+    # Connect the last through-path node to the output junction
+    if current_node != out_node:
+        components = _merge_nodes_list(components, current_node, out_node)
+
+    # --- Dump loads at each junction ---
+    if dump_design is not None:
+        dump_result = dump_design.transfo_result
+        dump_foster = dump_result.get('foster_form', dump_design.spec.foster_form)
+        dump_series = dump_result.get('series', [])
+        dump_shunt = dump_result.get('shunt', [])
+
+        # Reverse branch order: the dump path is built from the junction
+        # (reactive/open end) outward to the 50Ω load. The transfo has g1
+        # (source end) first, but the junction needs g_n (open end) first.
+        dump_series = list(reversed(dump_series))
+        dump_shunt = list(reversed(dump_shunt))
+
+        for side, junction_node, side_label in [
+            ('in', in_node, f"{prefix}_lp_in"),
+            ('out', out_node, f"{prefix}_lp_out"),
+        ]:
+            lp_node_counter = [0]
+            current = junction_node
+            ls_idx = 0
+            lh_idx = 0
+            total_dump = len(dump_series) + len(dump_shunt)
+
+            for j in range(total_dump):
+                if j % 2 == 0 and ls_idx < len(dump_series):
+                    comps, in_n, out_n = _branch_to_components(
+                        dump_series[ls_idx], 'series', dump_foster,
+                        side_label, lp_node_counter, comp_counter
+                    )
+                    comps = _merge_nodes_list(comps, in_n, current)
+                    components.extend(comps)
+                    current = out_n
+                    ls_idx += 1
+                elif lh_idx < len(dump_shunt):
+                    comps, in_n, out_n = _branch_to_components(
+                        dump_shunt[lh_idx], 'shunt', dump_foster,
+                        side_label, lp_node_counter, comp_counter
+                    )
+                    comps = _merge_nodes_list(comps, in_n, current)
+                    components.extend(comps)
+                    lh_idx += 1
+
+            # Load at the end of the dump path
+            components.append((f'R_load_{side}_{prefix}', current, '0', float(Z0)))
+    else:
+        # Simple resistors to ground at each junction
+        components.append((f'R_load_in_{prefix}', in_node, '0', float(Z0)))
+        components.append((f'R_load_out_{prefix}', out_node, '0', float(Z0)))
+
+    # --- Ports ---
+    port_components = [
+        (f'P1_{prefix}', in_node, '0', '1'),
+        (f'R1_{prefix}', in_node, '0', 'R_port'),
+        (f'P2_{prefix}', out_node, '0', '2'),
+        (f'R2_{prefix}', out_node, '0', 'R_port'),
+    ]
+    all_components = port_components + components
+
+    return PeripheralNetlist(
+        components=all_components,
+        parameters={'R_port': Z0},
+        port_map={
+            'input': (1, in_node),
+            'output': (2, out_node),
+        },
+        metadata={
+            'type': 'reflectionless_filter',
+            'through_response': through_design.spec.response.value,
+            'through_order': through_design.spec.order,
+            'has_dump_filters': dump_design is not None,
+            'n_components': len(all_components),
+        },
+    )
+
+
 # ============================================================================
 # Section 5: Netlist generation
 # ============================================================================
@@ -3310,6 +3588,53 @@ def compose_chain(blocks: list,
 
     normalized = [_normalize_block(b, i) for i, b in enumerate(blocks)]
 
+    # --- Deduplicate component names and nodes across blocks ---
+    # When two blocks have the same component names or node names (e.g., two
+    # copies of the same TWPA), suffix the second one to avoid collisions.
+    # Suffixes preserve the leading letter (L, C, R, P) required by JosephsonCircuits.jl.
+    seen_names = set()
+    seen_nodes = set()
+    for block_idx, (comps, params, port_map, meta) in enumerate(normalized):
+        block_names = set(name for name, _, _, _ in comps)
+        block_nodes = set()
+        for _, n1, n2, _ in comps:
+            if n1 != '0':
+                block_nodes.add(n1)
+            if n2 != '0':
+                block_nodes.add(n2)
+
+        name_collision = bool(block_names & seen_names)
+        node_collision = bool(block_nodes & seen_nodes)
+
+        if name_collision or node_collision:
+            tag = f"_t{block_idx}"  # suffix: _t2, _t3, etc.
+            new_comps = []
+            node_remap = {}
+            for name, n1, n2, val in comps:
+                new_name = name + tag
+                new_n1 = n1 if n1 == '0' else (n1 + tag if n1 in block_nodes else n1)
+                new_n2 = n2 if n2 == '0' else (n2 + tag if n2 in block_nodes else n2)
+                if n1 != '0' and n1 in block_nodes:
+                    node_remap[n1] = new_n1
+                if n2 != '0' and n2 in block_nodes:
+                    node_remap[n2] = new_n2
+                new_comps.append((new_name, new_n1, new_n2, val))
+
+            new_port_map = {}
+            for role, (pnum, node) in port_map.items():
+                new_port_map[role] = (pnum, node_remap.get(node, node))
+
+            new_params = {}
+            for k, v in params.items():
+                new_params[k] = v  # shared params (R_port, Lj, etc.) keep their names
+
+            normalized[block_idx] = (new_comps, new_params, new_port_map, meta)
+            seen_names.update(name for name, _, _, _ in new_comps)
+            seen_nodes.update(node_remap.values())
+        else:
+            seen_names.update(block_names)
+            seen_nodes.update(block_nodes)
+
     # --- Default connections ---
     if connections is None:
         connections = []
@@ -3453,8 +3778,8 @@ def compose_chain(blocks: list,
                 for label in arm_labels:
                     renamed.extend(reversed(arm_comps[label]))
                 renamed.extend(other_comps)  # any components not in an arm (shouldn't happen)
-            else:
-                renamed = list(reversed(renamed))
+            # For non-multiplexer peripherals (e.g., reflectionless filter),
+            # don't reverse — their internal component order is already correct.
 
         # Collect this block's external ports: {node: new_port_num}
         block_ports = {}

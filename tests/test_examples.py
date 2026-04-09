@@ -64,6 +64,7 @@ class TestExampleFilesExist:
         'julia_wrapper_example.py',
         'julia_plotter_example.py',
         'diplexer_twpa_example.py',
+        'twpa_twpa_example.py',
     ]
 
     def test_expected_examples_exist(self, examples_dir):

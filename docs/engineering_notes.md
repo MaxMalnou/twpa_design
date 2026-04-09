@@ -4,6 +4,52 @@ Living document tracking design decisions, physical reasoning, and implementatio
 
 ---
 
+## 2026-04-09: TWPA-TWPA center filter design
+
+### Context
+
+The TWPA-TWPA topology cascades two TWPAs through diplexers:
+```
+LP(in) ─┐                           ┌─LP (center) ─ 50Ω     50Ω ─ LP (center)─┐                           ┌─ LP(out)
+         ├─ common ─ TWPA1 ─ common ┤                                         ├─ common ─ TWPA2 ─ common ─┤
+HP(in) ─┘                           └─────────────── HP_center ───────────────┘                           └─ HP(out)
+```
+
+The signal path (LP arms) is terminated with 50 Ohm loads at the internal junction, while the pump/idler path (HP arms) passes through a center HP filter connecting the two inner diplexer common ports. This center filter is **doubly open-terminated**: neither end sees a resistive load, both see the reactive impedance of a diplexer common node.
+
+### Design challenge
+
+Standard filter design assumes either:
+- **Doubly terminated**: resistive loads on both ends (g0 and g_{n+1} real)
+- **Singly terminated**: resistive on one end, open on the other
+
+The center filter needs neither — it's doubly open. In classical filter theory, this can be handled via **immittance inverter design**: rewrite the ladder as resonators coupled through K/J inverters, where termination impedances only appear in the external inverter values. For open terminations (Z → ∞), the external inverters become large (weak coupling), and the internal coupling values are exact regardless of termination type. However, translating K/J inverters back to physical LC components requires absorbing negative elements at both open ends, which is mathematically messier than the singly-terminated case.
+
+### Current implementation: empirical symmetric extension
+
+For Butterworth prototypes, a simpler approach works well and is straightforward to implement with the existing g-value machinery:
+
+1. Compute singly-terminated g-values for a high-order filter (e.g., N=25)
+2. Observe that g-values near the open end converge to a constant (~2.0 for Butterworth)
+3. Take the last M converged values and mirror them symmetrically
+4. The center filter has component values: `[g_M, ..., g_2, g_1, g_1, g_2, ..., g_M]`
+5. Optionally extend the constant-valued middle section for longer filters
+
+This works because high-order Butterworth g-values approach `g_k → 2` far from the source end, so the interior of the filter resembles a uniform transmission line. The mirrored structure ensures symmetry between the two TWPA stages.
+
+**Why this is valid for Butterworth**: The converged g-values are the limiting case of the immittance inverter coupling coefficients for uniform coupling. The empirical approach and the systematic inverter method give the same result.
+
+**Limitation for Chebyshev**: Chebyshev g-values oscillate rather than converge, so simple mirroring doesn't apply. The immittance inverter method would handle Chebyshev correctly. This is a future improvement.
+
+### Future improvement
+
+Implement the immittance inverter approach for the center filter, which would:
+- Support Chebyshev and other approximations natively
+- Give exact component values without requiring high-order reference filters
+- Provide a more systematic design path
+
+---
+
 ## 2026-04-09: Full N-port S-matrix and harmonic extraction
 
 ### Context

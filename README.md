@@ -177,11 +177,14 @@ twpa_design/
     │   ├── atl_twpa_plotter_example.py
     │   ├── netlist_JC_builder_example.py
     │   ├── julia_wrapper_example.py
-    │   └── diplexer_twpa_example.py
+    │   ├── diplexer_twpa_example.py
+    │   └── twpa_twpa_example.py
     ├── netlists/                   # Example circuit netlists
     │   ├── 4wm_jtwpa_2002cells_01.py
     │   ├── 4wm_ktwpa_5004cells_01.py
-    │   └── b_jtwpa_2000cells_01.py
+    │   ├── b_jtwpa_2000cells_01.py
+    │   ├── diplexed_4wm_jtwpa_2002cells_01.py
+    │   └── twpa_twpa_4wm_jtwpa_2002cells_01.py
     ├── notebooks/                  # Jupyter tutorials
     │   ├── atl_twpa_designer.ipynb
     │   ├── julia_wrapper.ipynb
@@ -194,7 +197,11 @@ twpa_design/
     │   ├── 4wm_ktwpa_5004cells_01_pump9.10GHz_01.npz
     │   ├── 4wm_ktwpa_5004cells_01_pump9.10GHz_01.svg
     │   ├── b_jtwpa_2000cells_01_pump16.12GHz_01.npz
-    │   └── b_jtwpa_2000cells_01_pump16.12GHz_01.svg
+    │   ├── b_jtwpa_2000cells_01_pump16.12GHz_01.svg
+    │   ├── diplexed_4wm_jtwpa_2002cells_01_pump8.63GHz_01.npz
+    │   ├── diplexed_4wm_jtwpa_2002cells_01_pump8.63GHz_01.svg
+    │   ├── twpa_twpa_4wm_jtwpa_2002cells_01_pump8.55GHz_01.npz
+    │   └── twpa_twpa_4wm_jtwpa_2002cells_01_pump8.55GHz_01.svg
     └── external_packages/          # JosephsonCircuits.jl fork
         └── JosephsonCircuits.jl/   # Fork with Taylor expansion NL elements
             ├── README.md           # Fork documentation and usage
@@ -246,9 +253,9 @@ Two modeling approaches:
 ## Future Improvements
 
 - ⭕ Netlist visualization
-- ⭕ Systematic workflow for multi-mode resonator-based parametric amplifiers
+- ⭕ Floquet TWPA design support (spatially modulated JJ parameters)
 - ⭕ Chebyshev Type II filter support in filter builder
-- ⭕ TWPA-TWPA cascade topology examples (diplexer → TWPA → diplexer → TWPA → diplexer)
+- ⭕ Immittance inverter design for doubly open-terminated center filters
 
 ## Testing
 

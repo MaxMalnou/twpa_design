@@ -119,6 +119,42 @@ mux = design_multiplexer([
 ])
 ```
 
+### design_double_open_filter
+
+Design a doubly open-terminated filter for use as a center section (e.g., TWPA-TWPA HP center). Built by mirroring converged g-values from a high-order singly-terminated prototype.
+
+```python
+# HP center filter for TWPA-TWPA (odd order recommended for symmetry)
+center_hp = design_double_open_filter(
+    response='hp',
+    total_order=25,        # Odd: both ends are series caps
+    fc=8.3e9,
+    n_edge=3,              # Number of edge transition g-values
+)
+```
+
+Parameters:
+- `total_order`: Total filter order. Odd recommended for HP (both ends same element type).
+- `n_edge`: Number of g-values from the open end of the reference filter. Default 3.
+- `reference_order`: Order of the singly-terminated reference. Max ~25 for numerical stability.
+
+### build_reflectionless_filter
+
+Build a reflectionless (absorptive) filter as a 2-port block. The through-path passes the desired band, while complementary dump filters absorb the rejected band into loads.
+
+```python
+# Reflectionless HP filter for TWPA-TWPA center section
+center = build_reflectionless_filter(
+    through_design=center_hp,     # HP through-path
+    dump_design=lp_dump,          # LP dump filters + 50 Ohm loads
+    Z0=50.0,
+    prefix='nrf',
+)
+
+# Without dump filters (bare resistive loads)
+center = build_reflectionless_filter(through_design=center_hp)
+```
+
 ## Netlist Generation
 
 ### filter_to_netlist
@@ -271,6 +307,37 @@ results.s_param(3, 1)        # S31: signal gain (LP in -> LP out)
 results.s_param(4, 2)        # S42: pump transmission (HP in -> HP out)
 results.s_harmonic(1, 4, 1)  # Idler: mode 1, HP out, LP in
 ```
+
+## Example: TWPA-TWPA Cascade
+
+See `examples/twpa_twpa_example.py` for a cascaded topology:
+```
+diplexer_in -> TWPA1 -> reflectionless_HP -> TWPA2 -> diplexer_out
+```
+
+The center section is a reflectionless HP filter: pump/idler passes through the HP path, while signal is absorbed into LP dump loads terminated with 50 Ohm.
+
+```python
+from twpa_design.filter_builder import *
+
+# Design center section
+center_hp = design_double_open_filter('hp', total_order=25, fc=8.3e9, n_edge=3)
+lp_dump = ...  # singly-terminated LP filter
+center = build_reflectionless_filter(center_hp, dump_design=lp_dump, prefix='nrf')
+
+# Compose 5-block chain
+comps, params, meta = compose_chain(
+    [d_in, twpa1, center, twpa2, d_out],
+    connections=[
+        ('common', 'input'),   # d_in -> TWPA1
+        ('output', 'input'),   # TWPA1 -> center HP
+        ('output', 'input'),   # center HP -> TWPA2
+        ('output', 'common'),  # TWPA2 -> d_out
+    ],
+)
+```
+
+The compose_chain automatically handles node deduplication when two copies of the same TWPA are used (component names and nodes are suffixed with `_t{N}` to avoid collisions while preserving the leading letter required by JosephsonCircuits.jl).
 
 ## g-value Computation
 
