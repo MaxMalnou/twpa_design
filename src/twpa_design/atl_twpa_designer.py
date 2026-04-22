@@ -810,37 +810,57 @@ class ATLTWPADesigner:
 
     ########################################################################################    
 
-    def plot_modulation_profile(self):
-        """Plot the capacitance modulation profile for periodic/both dispersion types."""
+    def plot_modulation_profile(self, normalized=True, block=False):
+        """Plot the capacitance modulation profile for periodic/both dispersion types.
+
+        Args:
+            normalized (bool): If True, plot C/C0 with y-axis fixed to (0, 2).
+                If False, plot absolute capacitance in F with auto-scaled y-axis.
+            block (bool): If True, block execution until the plot window is closed.
+        """
         if self.dispersion_type not in ['periodic', 'both']:
             if self.verbose:
                 print("Modulation profile plot only available for periodic or both dispersion types")
             return
-            
+
         if not hasattr(self, 'g_C_mod') or self.g_C_mod is None:
             raise ValueError("Must run calculate_derived_quantities() before plotting modulation profile")
-            
+
         Nmax2plot_cell = 1000
         if Nmax2plot_cell > self.Ntot_cell:
             Nmax2plot_cell = self.Ntot_cell
-            
+
         fig = plt.figure(figsize=(8.6/2.54, 2))
-        subp = fig.add_subplot(111)
-        subp.plot(range(1, Nmax2plot_cell), self.g_C_mod[1:Nmax2plot_cell]/self.g_C, 
-                  linewidth=0.5, color=blue)
-        plt.grid(True)
-        plt.xlim((0, Nmax2plot_cell))
-        plt.ylim((0, 2))
-        plt.xlabel('Cell number')
-        plt.ylabel('$C$')
-        plt.gca().xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
-        plt.gca().yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
-        
+        ax = fig.add_subplot(111)
+
+        if normalized:
+            ax.plot(range(1, Nmax2plot_cell), self.g_C_mod[1:Nmax2plot_cell]/self.g_C,
+                    linewidth=0.5, color=blue)
+            ax.set_ylim((0, 2))
+            ax.set_ylabel('$C/C_0$')
+        else:
+            C_mean = np.mean(np.abs(self.CTLsec_F[1:Nmax2plot_cell]))
+            if C_mean >= 1e-9:
+                scale, unit = 1e9, 'nF'
+            elif C_mean >= 1e-12:
+                scale, unit = 1e12, 'pF'
+            else:
+                scale, unit = 1e15, 'fF'
+            ax.plot(range(1, Nmax2plot_cell), self.CTLsec_F[1:Nmax2plot_cell] * scale,
+                    linewidth=0.5, color=blue)
+            ax.set_ylabel(f'$C$ [{unit}]')
+
+        ax.set_xlim((0, Nmax2plot_cell))
+        ax.set_xlabel('Cell number')
+        ax.grid(True)
+        ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
+
         fig.set_size_inches(4, 2)
 
         plt.tight_layout()
-        plt.show(block=False)
-        
+        plt.show(block=block)
+
         # Store figure reference
         self.results['modulation_profile_fig'] = fig
 
@@ -2141,7 +2161,8 @@ class ATLTWPADesigner:
 
     ######################################################################################## 
 
-    def run_design(self, interactive=True, save_results=False, save_plots=False, output_dir=None):
+    def run_design(self, interactive=True, save_results=False, save_plots=False, output_dir=None,
+                    plot_modulation_normalized=True):
         """
         Run the complete TWPA design workflow.
 
@@ -2156,6 +2177,9 @@ class ATLTWPADesigner:
             If True, save phase matching plot as SVG
         output_dir : str or Path, optional
             Output directory for saved files. If None, uses package's designs/ folder
+        plot_modulation_normalized : bool
+            If True, plot modulation profile as C/C0 with fixed y-axis (0, 2).
+            If False, plot absolute capacitance in F with auto-scaled y-axis.
 
         Returns
         -------
@@ -2177,7 +2201,7 @@ class ATLTWPADesigner:
         # Step 3: Modulation profile (if applicable)
         if self.dispersion_type in ['periodic', 'both']:
             print("\n[3/6] Modulation profile")
-            self.plot_modulation_profile()
+            self.plot_modulation_profile(normalized=plot_modulation_normalized)
             if interactive and not self._continue_prompt():
                 return self._get_results_summary()
         
