@@ -1005,7 +1005,7 @@ class TWPAResults:
             handletextpad=0.5,
             borderaxespad=0.5,
             ncol=n_cols,
-            columnspacing=-3.5 if n_cols == 2 else 1.0
+            columnspacing=0.5
         )
 
         ax.set_ylabel(r'$|S|$-parameters [dB]', fontsize=fontsize)
