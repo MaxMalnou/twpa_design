@@ -44,9 +44,22 @@ config = NetlistConfig(
   - Note: KI devices always use Taylor expansion regardless of this setting
 - **enable_dielectric_loss**: Add loss to dielectric capacitors as complex admittance (excludes junction capacitance Cj)
 - **loss_tangent**: Dielectric loss tangent tan(δ), typical values 1e-4 to 1e-3
-- **use_linear_in_window**: In windowed periodic structures, use linear L in apodization regions
+- **use_linear_in_window**: In windowed periodic structures, use linear L in apodization regions. Automatically set to `False` when the design uses Floquet taper.
 - **Ntot_cell_override**: Force different number of cells than design specifies
 - **output_dir**: Custom output directory for netlists (if None, uses package's netlists/ folder)
+
+#### Tapered designs (impedance and Floquet nonlinearity)
+
+When the design file enables either `Z_taper` or `floquet_taper`, the netlist builder calls the shared helper `helper_functions.compute_taper_arrays` — the same function the designer uses — so the per-cell arrays are reconstructed identically. It then:
+
+- Reconstructs `Z(n)`, `fc(n)`, `L0(n)`, `C(n)`, and the Floquet weight `w(n)` from the saved profile parameters (`Z_taper_width`, `Z_profile`, `klopfenstein_A`, `floquet_taper_width`, `floquet_profile`, `taper_cutoff`, …). The `Z_profile` (`'linear'` or `'klopfenstein'`) forces exact endpoint matching at the device edges and at the taper→center boundary.
+- Builds taper cells (the union of the impedance and Floquet taper regions) with per-cell numeric component values: NL inductor, CJ, series remainder, shunt cap (with periodic-modulation overlay), and — at filter positions — recomputed filter resonator components.
+- Builds center cells with shared symbolic parameters (same as untapered designs).
+- Forces `use_linear_in_window = False` (taper cells must have nonlinear elements).
+- For rf_squid + `rf_squid_constant_plasma=True`: adds an extra shunt capacitance `Cjx{component_name}` in parallel with each rf_squid in the taper, computed to keep the rf_squid plasma frequency uniform along the line. The Cjx values are smooth (zero in the center, max at the edges) and appear inline as numeric values in the netlist.
+- Applies `enable_dielectric_loss` uniformly: the loss tangent wrapper `/(1+tan_δ·im)` is added to every dielectric capacitor — inline numeric caps in the taper region (TLsec and filter shunts alike) as well as symbolic capacitors in the center — and excluded from the junction capacitance `Cj`.
+
+No additional NetlistConfig settings are needed for tapered designs.
 
 ---
 

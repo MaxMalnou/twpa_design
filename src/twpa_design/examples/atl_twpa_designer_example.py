@@ -63,6 +63,52 @@ Periodic modulation parameters
 'alpha': apodization length (as a proportion of the line's total length) of the window. default: 0.0
 'n_filters_per_sc': number of filters per supercell. default: 1
 
+Taper parameters
+-----------------
+The line supports two independent edge tapers — an impedance taper that ramps Z(n) from
+Z0_ohm at the edges to Z0_TWPA_ohm in the center, and a Floquet nonlinearity taper that
+ramps the nonlinear element strength via a weight profile w(n). Each has its own enable
+flag, width, and shape. They can be used independently or together. See the
+docs/engineering_notes.md "2026-05-01" entry for the full design rationale.
+
+Impedance taper:
+'Z_taper': enable the impedance taper. default: None (auto). When None, auto-enabled iff
+           Z0_TWPA_ohm != Z0_ohm. Setting explicitly to True/False overrides the auto;
+           explicitly disabling with mismatched impedances raises ValueError.
+'Z_taper_width': fraction of the line used for the Z ramp (each side is Z_taper_width/2).
+                 default: 0.3. No-op when Z_taper is disabled.
+'Z_profile': impedance taper shape, default 'linear'. Can be 'linear' or 'klopfenstein'.
+             - 'linear': Z varies linearly with cell index across the taper.
+             - 'klopfenstein': equiripple-optimal Klopfenstein taper, minimizes the maximum
+               in-band reflection (low-frequency ripples).
+             Both force Z=Z0_ohm at the device edges and Z=Z0_TWPA_ohm at the taper-center
+             boundary exactly.
+'klopfenstein_A': Klopfenstein design parameter A (default None → auto from 5% max ripple).
+                  Larger A = sharper cutoff but larger in-band ripple.
+
+Floquet nonlinearity taper:
+'floquet_taper': enable the Floquet nonlinearity taper. default: False. Mutually exclusive
+                 with window_type/alpha apodization.
+'floquet_profile': shape of w(n). default: 'gaussian'. Can be 'gaussian' or 'tukey'.
+'floquet_taper_width': fraction of the line used for the nonlinearity ramp
+                       (each side is floquet_taper_width/2). default: 0.3.
+
+Shared:
+'taper_cutoff': default False. Controls whether fc(n) or C(n) absorbs per-cell variation.
+                - False: fc(n) = fc_center, C(n) varies. For JJ with floquet_taper, a linear
+                  series remainder absorbs the L0(n) variation.
+                - True: C(n) = C_center, fc(n) varies. For JJ/rf_squid with floquet_taper,
+                  L_total(n) scales by w_eff(n) so no extra remainder is needed.
+                Forced True for rf_squid (the asymmetry rules out the False mode). For KI
+                without an impedance taper the linear cell is uniform regardless of the flag
+                (only Istar(n) varies).
+'rf_squid_constant_plasma': rf_squid only — add an extra shunt capacitor Cjx in parallel
+                            with each rf-SQUID so that the local plasma frequency
+                            (Lj||Lg)*Cj_total stays constant along the taper. default: True.
+                            Strongly recommended for Floquet rf_squid designs: dramatically
+                            improves harmonic balance convergence and the gain shape. No-op
+                            for bare JJ and KI cases.
+
 Nonlinearity parameters
 -----------------
 'nonlinearity': type of nonlinearity. default 'JJ'. Can be 'JJ' (Josephson junction) or 'KI' (kinetic inductance)
@@ -186,11 +232,141 @@ DEVICE_CONFIGS = {
         'fa_max_GHz': 9.6,   
         # TWPA line parameters
         'Ntot_cell': 5000, # 5598
-    }
+    },
+    'floquet_jtwpa': {
+        # Basic parameters
+        'device_name': 'floquet_jtwpa',
+        'fmax_GHz':25,
+        # Filter parameters
+        'f_zeros_GHz': 9,
+        'f_poles_GHz': 8.85,
+        'fc_filter_GHz': 200,
+        'fc_TLsec_GHz': 200,
+        'Foster_form_C': 1,
+        'Foster_form_L': 1,
+        'select_one_form': 'C',
+        # profile parameters
+        'floquet_taper': True,
+        'floquet_taper_width': 0.5,
+        'taper_cutoff': True,
+        # Nonlinearity parameters
+        'nonlinearity': 'JJ',
+        'jj_structure_type': 'jj',
+        'Ic_JJ_uA': 5,
+        'fJ_GHz':40,
+        # Phase-matching parameters
+        'WM': '4WM',
+        'dir_prop_PA': 'forw',
+        'Ia0_uA': 3,
+        'detsigidlGHz': 3,        
+        'fa_min_GHz': 7.75,
+        'fa_max_GHz': 8.75,
+        # TWPA line parameters
+        'Ntot_cell': 2500,
+        'nTLsec': 10,
+    },
+     'rfsq_twpa': {
+        # Basic parameters
+        'device_name': 'rfsq_twpa',        
+        'fmax_GHz':25,
+        # Filter parameters
+        'f_zeros_GHz': 9,
+        'f_poles_GHz': 8.85,
+        'fc_filter_GHz': 500,
+        'fc_TLsec_GHz': 500,
+        'Foster_form_C': 1,
+        'Foster_form_L': 1,
+        'select_one_form': 'C',
+        # Nonlinearity parameters
+        'nonlinearity': 'JJ',
+        'jj_structure_type': 'rf_squid',
+        'beta_L': 0.8,
+        'phi_dc': 0,
+        'Ic_JJ_uA': 5,
+        'fJ_GHz':40,
+        # Phase-matching parameters
+        'WM': '4WM',
+        'dir_prop_PA': 'forw',
+        'Ia0_uA': 8,
+        'detsigidlGHz': 3,        
+        'fa_min_GHz': 7.75,
+        'fa_max_GHz': 8.75,
+        # TWPA line parameters
+        'Ntot_cell': 2500,
+        'nTLsec': 10,
+    },
+        'floquet_rfsq_twpa': {
+        # Basic parameters
+        'device_name': 'floquet_rfsq_twpa',        
+        'fmax_GHz':25,
+        # Filter parameters
+        'f_zeros_GHz': 9,
+        'f_poles_GHz': 8.85,
+        'fc_filter_GHz': 500,
+        'fc_TLsec_GHz': 500,
+        'Foster_form_C': 1,
+        'Foster_form_L': 1,
+        'select_one_form': 'C',
+        # profile parameters
+        'floquet_taper': True,        
+        'floquet_taper_width': 0.9,
+        # Nonlinearity parameters
+        'nonlinearity': 'JJ',
+        'jj_structure_type': 'rf_squid',
+        'beta_L': 0.8,
+        'phi_dc': 0,
+        'Ic_JJ_uA': 5,
+        'fJ_GHz':40,
+        # Phase-matching parameters
+        'WM': '4WM',
+        'dir_prop_PA': 'forw',
+        'Ia0_uA': 8,
+        'detsigidlGHz': 3,        
+        'fa_min_GHz': 7.75,
+        'fa_max_GHz': 8.75,
+        # TWPA line parameters
+        'Ntot_cell': 2500,
+        'nTLsec': 10,
+    },
+    'floquet_ktwpa': {
+        # Basic parameters
+        'device_name': 'floquet_ktwpa',
+        'fmax_GHz': 30,        
+        # Filter parameters
+        'f_zeros_GHz': 9.8,
+        'f_poles_GHz': 9.75,
+        'fc_filter_GHz': 500,
+        'fc_TLsec_GHz': 500,
+        'Foster_form_L': 2,
+        'Foster_form_C': 1,        
+        'select_one_form': 'L',
+        'stopbands_config_GHz': {27: {'max': 4}},  # Stopband at 27 GHz with upper edge at +4 GHz        
+        'n_filters_per_sc': 1,                      
+        # Taper parameters (Z_taper auto-enabled since Z0_TWPA_ohm != 50)
+        'Z0_TWPA_ohm': 100,
+        'Z_taper_width': 0.3,
+        'Z_profile': 'klopfenstein',
+        'floquet_taper': True,        
+        'floquet_taper_width': 0.3,
+        'taper_cutoff': False,        
+        # Nonlinearity parameters      
+        'nonlinearity': 'KI',
+        'Istar_uA': 100,
+        'L0_pH': 150,
+        # Phase-matching parameters
+        'WM': '4WM',
+        'dir_prop_PA': 'forw',
+        'Ia0_uA': 30,
+        'detsigidlGHz': 3,
+        'fa_min_GHz': 8.7,
+        'fa_max_GHz': 9.7,   
+        # TWPA line parameters
+        'Ntot_cell': 10000,
+    },
 }
 
 
-simulation_type = "b_jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
+simulation_type = "floquet_ktwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa', 'floquet_jtwpa', 'floquet_rfsq_twpa', 'floquet_ktwpa'
 
 # Get the config for the chosen device
 if simulation_type in DEVICE_CONFIGS:

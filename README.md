@@ -235,6 +235,7 @@ jupyter lab
 - **Filter dispersion**: Foster form L/C filters at zero/pole frequencies
 - **Periodic modulation**: Spatial modulation with windowing (boxcar, Tukey, Hann)
 - **Combined approach**: Both filter and periodic dispersion
+- **Floquet taper**: Smooth nonlinearity ramp at device edges (Gaussian or Tukey profile) with optional impedance transformation, cutoff frequency tapering, and (for rf_squid) constant-plasma-frequency compensation via an extra shunt capacitor
 
 ## Supported JJ Structures
 
@@ -253,7 +254,7 @@ Two modeling approaches:
 ## Future Improvements
 
 - ⭕ Netlist visualization
-- ⭕ Floquet TWPA design support (spatially modulated JJ parameters)
+- ✅ Floquet TWPA design support (spatially modulated nonlinearity with impedance/cutoff tapering)
 - ⭕ Chebyshev Type II filter support in filter builder
 - ⭕ Immittance inverter design for doubly open-terminated center filters
 
@@ -267,7 +268,28 @@ python -m pytest           # run all tests
 python -m pytest -v        # verbose output
 ```
 
-Tests cover: module imports, g-value computation against known tables, filter/multiplexer netlist generation, topology composition, S-matrix save/load backward compatibility, and syntax checks on all source files.
+Tests cover: module imports, g-value computation against known tables, filter/multiplexer netlist generation, topology composition, S-matrix save/load backward compatibility, syntax checks on all source files, and an env smoke test for scipy's Fortran L-BFGS-B optimizer (see Troubleshooting).
+
+## Troubleshooting
+
+### `Windows fatal exception: code 0xc06d007f` during phase-matching optimization
+
+This is a BLAS/LAPACK DLL mismatch in your Python environment, not a package bug. The most common cause is `pip install`-ing `numpy` or `scipy` on top of a conda env: pip-built scipy expects a specific OpenBLAS DLL hash, but the conda env has MKL (or vice versa), and scipy's compiled L-BFGS-B fails to resolve its BLAS symbols at runtime.
+
+Symptom: scripts using `ATLTWPADesigner` with `stopbands_config_GHz` set exit silently around `Stage 1: Finding approximate solutions...` (the exception only appears with `python -X faulthandler`).
+
+Fix — keep `numpy` and `scipy` on a single package manager:
+
+```powershell
+# In a conda env:
+pip uninstall -y scipy numpy
+conda install -n <env_name> --force-reinstall scipy numpy
+
+# Or in a pure-pip env:
+pip install --force-reinstall scipy numpy
+```
+
+The `tests/test_scipy_env.py` smoke test catches this regression by exercising L-BFGS-B in a subprocess.
 
 ## License
 

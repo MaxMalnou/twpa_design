@@ -81,6 +81,68 @@ Periodic modulation parameters
 'alpha': apodization length (as a proportion of the line's total length) of the window. default: 0.0
 'n_filters_per_sc': number of filters per supercell. default: 1
 
+Taper parameters
+-----------------
+The device supports two independent edge tapers — an impedance taper (Z_taper)
+that ramps the cell characteristic impedance from Z0_ohm at the device edges
+to Z0_TWPA_ohm in the center, and a Floquet nonlinearity taper (floquet_taper)
+that ramps the nonlinear element strength from weak at the edges to full
+strength in the center. Each has its own enable flag, width, and shape
+parameters. They can be used independently or together. See docs/engineering_notes.md
+("2026-05-01: Tapered TWPA design") for the full design rationale.
+
+'Z_taper': enable the impedance taper. default: None (auto). When None, it is auto-enabled
+           whenever Z0_TWPA_ohm != Z0_ohm and left disabled otherwise. Setting it explicitly
+           to True or False overrides the auto behavior; explicitly disabling it with
+           mismatched impedances raises ValueError (the line would have an impedance step).
+'Z_taper_width': total taper fraction of the line used for the impedance ramp. default: 0.3.
+                 Each side is Z_taper_width/2 of the line, the center is (1 - Z_taper_width).
+                 No-op when Z_taper is disabled.
+'Z_profile': impedance taper shape between Z0_ohm (at the device edges) and Z0_TWPA_ohm
+             (in the center). default: 'linear'. Can be 'linear' or 'klopfenstein'.
+             - 'linear': Z(n) is linear in cell index across the taper.
+             - 'klopfenstein': equiripple-optimal taper (Klopfenstein 1956). For the same
+               impedance ratio and taper length, this minimizes the maximum in-band
+               reflection (the standing-wave ripples in S21 at low frequency).
+             Both options force Z(0) = Z0_ohm and Z(taper_end) = Z0_TWPA_ohm exactly.
+'klopfenstein_A': Klopfenstein design parameter A (default None). When None, A is
+                  auto-computed from a target 5% max in-band ripple via the standard
+                  relation A = arccosh(Gamma_0 / 0.05) with Gamma_0 = ½·ln(Z_TWPA/Z_env).
+                  Larger A gives sharper cutoff at the expense of larger in-band ripple.
+'floquet_taper': enable Floquet nonlinearity taper. default: False. Mutually exclusive with
+                 window_type/alpha apodization. When enabled, the nonlinearity ramps from
+                 weak at the device edges to full strength in the center via a profile w(n);
+                 the series inductor at each cell is split into a nonlinear part + linear
+                 remainder. The linear cell components (filters, shunt capacitance) come
+                 from the standard linear design at the local Z(n) and fc(n).
+'floquet_profile': shape of the Floquet nonlinearity profile w(n). default: 'gaussian'.
+                   Can be 'gaussian' or 'tukey'.
+                   Gaussian: w(n) = 1 - exp(-n^2/(2*sigma^2)), smooth ramp from ~0 to ~1.
+                   Tukey: half-cosine ramp from 0 to 1 on each side.
+'floquet_taper_width': total taper fraction of the line used for the nonlinearity ramp.
+                       default: 0.3. Each side is floquet_taper_width/2 of the line, the
+                       center is (1 - floquet_taper_width). No-op when floquet_taper=False.
+'taper_cutoff': controls whether fc(n) or C(n) absorbs the per-cell variation when either
+                Z or the nonlinearity tapers. default: False.
+                - False: fc(n) = fc_center everywhere; C(n) varies. For JJ with floquet_taper,
+                  a linear series remainder absorbs the L0(n) variation so L_total stays put.
+                - True: C(n) = C_center everywhere; fc(n) varies. For JJ/rf_squid with
+                  floquet_taper, L_total(n) scales by w_eff(n) so no extra remainder is needed.
+                  For an impedance taper alone, fc(n) = fc_center · Z_center / Z(n).
+                Forced True for jj_structure_type='rf_squid' (the rf-SQUID effective inductance
+                Lg/(1+beta_L*w*cos(phi_dc)) is *more* than the center value at the edges, so a
+                passive series remainder cannot subtract enough inductance to keep Z and fc
+                simultaneously constant — the only physical option is to retune fc).
+'rf_squid_constant_plasma': rf_squid only — add an extra shunt capacitor Cjx in parallel with each
+                            rf-SQUID so that the local plasma frequency, set by (Lj||Lg)*Cj_total,
+                            stays constant along the Floquet taper. default: True.
+                            Without it, the rf-SQUID plasma resonance varies by ~3x between edge and
+                            center for typical beta_L=0.8 designs, which severely degrades harmonic
+                            balance convergence and the gain shape. The extra cap value is
+                            Cjx(n) = (1 - w(n)) * CJ_F / (1 + beta_L*cos(phi_dc)),
+                            so it is zero at the center and grows at the edges. Has no effect for
+                            bare JJ or KI nonlinearities.
+
 Nonlinearity parameters
 -----------------
 'nonlinearity': type of nonlinearity. default 'JJ'. Cen be 'JJ' (Josephson junction) or 'KI' (kinetic inductance)
@@ -140,7 +202,18 @@ DEFAULT_CONFIG = {
     'window_type': 'boxcar', # 'tukey' Or 'hann', 'boxcar'
     'alpha': 0.0,
     'n_filters_per_sc': 1,
-    
+    # Impedance taper parameters (independent of Floquet nonlinearity taper)
+    'Z_taper': None,                # None = auto (True iff Z0_TWPA_ohm != Z0_ohm); user can override
+    'Z_taper_width': 0.3,           # total fraction of the line used for the Z ramp
+    'Z_profile': 'linear',          # 'linear' or 'klopfenstein' — impedance taper shape
+    'klopfenstein_A': None,         # Klopfenstein design parameter; None → auto from 5% max ripple
+    # Floquet nonlinearity taper parameters (independent of impedance taper)
+    'floquet_taper': False,
+    'floquet_profile': 'gaussian',  # 'gaussian' or 'tukey' — nonlinearity weight shape
+    'floquet_taper_width': 0.3,     # total fraction of the line used for the nonlinearity ramp
+    'taper_cutoff': False,          # True: fc varies, C constant. False: fc constant, C varies.
+    'rf_squid_constant_plasma': True,  # rf_squid only: add extra shunt cap to keep (Lj||Lg)*Cj constant along the line
+
     # Nonlinearity parameters
     'nonlinearity': 'JJ',  # 'JJ' or 'KI'
     'Id_uA': 0,
@@ -216,7 +289,25 @@ class ATLTWPADesigner:
     nTLsec: int
     n_jj_struct: int
     Z0_TWPA_ohm: float
-    
+    Z_taper: Optional[bool]
+    Z_taper_width: float
+    Z_profile: str
+    klopfenstein_A: Optional[float]
+    floquet_taper: bool
+    floquet_profile: str
+    floquet_taper_width: float
+    taper_cutoff: bool
+    rf_squid_constant_plasma: bool
+
+    # Taper computed attributes
+    floquet_weights: Optional[npt.NDArray[np.float64]]
+    Z_percell: Optional[npt.NDArray[np.float64]]
+    floquet_center_start: Optional[int]
+    floquet_center_end: Optional[int]
+    floquet_cell_params: Optional[Dict[str, Any]]
+    L0_H_percell: Optional[npt.NDArray[np.float64]]
+    CJ_F_percell: Optional[npt.NDArray[np.float64]]
+
     # Type hints for calculated parameters
     sig_above_idl: int
     g_L: float
@@ -346,16 +437,83 @@ class ATLTWPADesigner:
         # Derive dispersion_type from the parameters
         self.dispersion_type = derive_dispersion_type(self.f_zeros_GHz, self.f_poles_GHz, self.f_stopbands_GHz)
         
-        # Normalize string parameters to lowercase
-        string_params_to_normalize = [
-            'window_type',        
-            'dir_prop_PA',     
+        # Normalize string parameters to the case expected by the code.
+        # User input is case-insensitive; internal code uses the canonical case below.
+        string_params_to_lowercase = [
+            'window_type',         # 'boxcar', 'tukey', 'hann'
+            'dir_prop_PA',         # 'forw' or 'back'
+            'jj_structure_type',   # 'jj' or 'rf_squid'
+            'floquet_profile',     # 'gaussian' or 'tukey'
+            'Z_profile',           # 'linear' or 'klopfenstein'
         ]
-        
-        for param in string_params_to_normalize:
+        string_params_to_uppercase = [
+            'nonlinearity',        # 'JJ' or 'KI'
+            'WM',                  # '3WM' or '4WM'
+        ]
+
+        for param in string_params_to_lowercase:
             if hasattr(self, param) and isinstance(getattr(self, param), str):
                 setattr(self, param, getattr(self, param).lower())
-        
+
+        for param in string_params_to_uppercase:
+            if hasattr(self, param) and isinstance(getattr(self, param), str):
+                setattr(self, param, getattr(self, param).upper())
+
+        # select_one_form: 'L', 'C' (uppercase) or 'both' (lowercase). Normalize accordingly.
+        if hasattr(self, 'select_one_form') and isinstance(self.select_one_form, str):
+            sof = self.select_one_form.strip().lower()
+            self.select_one_form = 'both' if sof == 'both' else sof.upper()
+
+        # Validate values
+        if self.nonlinearity not in ('JJ', 'KI'):
+            raise ValueError(f"nonlinearity must be 'JJ' or 'KI', got '{self.nonlinearity}'")
+        if self.nonlinearity == 'JJ' and hasattr(self, 'jj_structure_type'):
+            if self.jj_structure_type not in ('jj', 'rf_squid'):
+                raise ValueError(f"jj_structure_type must be 'jj' or 'rf_squid', got '{self.jj_structure_type}'")
+        if hasattr(self, 'WM') and self.WM not in ('3WM', '4WM'):
+            raise ValueError(f"WM must be '3WM' or '4WM', got '{self.WM}'")
+        if hasattr(self, 'floquet_profile') and self.floquet_profile not in ('gaussian', 'tukey'):
+            raise ValueError(f"floquet_profile must be 'gaussian' or 'tukey', got '{self.floquet_profile}'")
+        if hasattr(self, 'Z_profile') and self.Z_profile not in ('linear', 'klopfenstein'):
+            raise ValueError(
+                f"Z_profile must be 'linear' or 'klopfenstein', got '{self.Z_profile}'")
+        if hasattr(self, 'select_one_form') and self.select_one_form not in ('L', 'C', 'both'):
+            raise ValueError(f"select_one_form must be 'L', 'C', or 'both', got '{self.select_one_form}'")
+
+        # Resolve Z_taper: auto-enable iff impedances differ; allow explicit override.
+        impedances_match = (self.Z0_TWPA_ohm == self.Z0_ohm) if hasattr(self, 'Z0_ohm') \
+                           else (self.Z0_TWPA_ohm == 50)  # Z0_ohm defaults to 50 in run_initial_calculations
+        if self.Z_taper is None:
+            self.Z_taper = not impedances_match
+        elif self.Z_taper is False and not impedances_match:
+            raise ValueError(
+                f"Z_taper=False with Z0_TWPA_ohm={self.Z0_TWPA_ohm} != Z0_ohm=50 would leave "
+                "an impedance step at the device boundaries. Either set Z_taper=True (or None for "
+                "auto) to ramp the impedance, or set Z0_TWPA_ohm = Z0_ohm to remove the mismatch."
+            )
+
+        # Validate Floquet taper mutual exclusivity with apodization
+        if getattr(self, 'floquet_taper', False):
+            if self.window_type != 'boxcar' or self.alpha != 0.0:
+                raise ValueError(
+                    "floquet_taper is mutually exclusive with existing apodization. "
+                    "Set window_type='boxcar' and alpha=0.0 when using Floquet taper."
+                )
+
+            # For rf_squid, force taper_cutoff=True. With beta_L ramped down at the
+            # edges, L0(edge) = Lg > L0(center), so the cells become "thicker" at the
+            # edges. There is no way to keep both Z=Z_env and fc constant because no
+            # series remainder can subtract inductance. The only physically meaningful
+            # design is to let fc adjust so that Z stays matched at the edges.
+            if (getattr(self, 'nonlinearity', '') == 'JJ'
+                    and getattr(self, 'jj_structure_type', '') == 'rf_squid'
+                    and not getattr(self, 'taper_cutoff', False)):
+                if self.verbose:
+                    print("⚠️  taper_cutoff=False is not physically meaningful for rf_squid "
+                          "(would cause unavoidable impedance mismatch at edges). "
+                          "Forcing taper_cutoff=True.")
+                self.taper_cutoff = True
+
         # Configuration summary
         if self.verbose:
             print(f"\n=== Configuration Loaded: {self.device_name} ===")
@@ -608,7 +766,12 @@ class ATLTWPADesigner:
             
         if self.dispersion_type == 'filter' or self.dispersion_type == 'both':
             self._finalize_filter_calculations()
-            
+
+        # Apply taper arrays if either the impedance taper or the Floquet
+        # nonlinearity taper is enabled (after the center linear design is done).
+        if getattr(self, 'floquet_taper', False) or getattr(self, 'Z_taper', False):
+            self._compute_taper_arrays()
+
         # Store results
         self.results['derived_quantities'] = {
             'LTLsec_H': self.LTLsec_H,
@@ -700,7 +863,94 @@ class ATLTWPADesigner:
             
         # Calculate dimensioned shunt capacitance
         self.CTLsec_F = self.g_C_mod / (self.Z0_TWPA_ohm * 2 * np.pi * self.fc_TLsec_GHz * 1E9)
-        
+
+    def _compute_taper_arrays(self):
+        """Compute per-cell taper arrays for the impedance and Floquet nonlinearity tapers.
+
+        Delegates to `helper_functions.compute_taper_arrays`, which is the
+        single source of truth shared with the netlist builder. Stores the
+        returned per-cell arrays on `self` for use by the linear-response and
+        netlist code paths.
+
+        See docs/engineering_notes.md ("2026-05-01: Tapered TWPA design") for
+        the design rationale.
+        """
+        from .helper_functions import compute_taper_arrays
+
+        taper = compute_taper_arrays(
+            Ntot_cell=self.Ntot_cell, Ncpersc_cell=self.Ncpersc_cell,
+            Z_taper=self.Z_taper, Z_taper_width=self.Z_taper_width,
+            Z_profile=self.Z_profile, klopfenstein_A=self.klopfenstein_A,
+            floquet_taper=self.floquet_taper,
+            floquet_taper_width=self.floquet_taper_width,
+            floquet_profile=self.floquet_profile,
+            taper_cutoff=self.taper_cutoff,
+            Z0_ohm=self.Z0_ohm, Z0_TWPA_ohm=self.Z0_TWPA_ohm,
+            fc_TLsec_GHz=self.fc_TLsec_GHz,
+            LTLsec_H_center=self.LTLsec_H, L0_H_center=self.L0_H,
+            g_L=self.g_L, g_C=self.g_C,
+            nonlinearity=self.nonlinearity,
+            jj_structure_type=getattr(self, 'jj_structure_type', 'jj'),
+            phi_dc=getattr(self, 'phi_dc', 0),
+            beta_L=getattr(self, 'beta_L', None),
+            LJ0_H=getattr(self, 'LJ0_H', None),
+            Lg_H=getattr(self, 'Lg_H', None),
+            CJ_F=getattr(self, 'CJ_F', None),
+            Ic_JJ_A=getattr(self, 'Ic_JJ_A', None),
+            Istar_A=getattr(self, 'Istar_A', None),
+            Id_A=getattr(self, 'Id_A', None),
+            L0_pH=getattr(self, 'L0_pH', None),
+            n_jj_struct=self.n_jj_struct,
+            LinfLF1_H=getattr(self, 'LinfLF1_H', None),
+            L0LF2_H=getattr(self, 'L0LF2_H', None),
+            Foster_form_L=self.Foster_form_L,
+            Foster_form_C=self.Foster_form_C,
+            zero_at_zero=self.zero_at_zero,
+            select_one_form=self.select_one_form,
+            f_zeros_GHz=getattr(self, 'f_zeros_GHz', None),
+            f_poles_GHz=getattr(self, 'f_poles_GHz', None),
+            dispersion_type=self.dispersion_type,
+            g_C_mod=getattr(self, 'g_C_mod', None),
+            rf_squid_constant_plasma=getattr(self, 'rf_squid_constant_plasma', False),
+        )
+
+        # Unpack per-cell arrays onto self.
+        self.floquet_weights = taper['w_percell']
+        self.Z_percell = taper['Z_percell']
+        self.floquet_fc_profile = taper['fc_percell']
+        self.floquet_w_eff = taper['w_eff']
+        self.floquet_center_start = taper['center_start']
+        self.floquet_center_end = taper['center_end']
+        self.width = taper['width']
+        self.n_periodic_sc = taper['n_periodic_sc']
+        self.floquet_linear_varies = taper['linear_varies']
+        self.floquet_cell_params = taper['floquet_cell_params']
+        self.L0_H_percell = taper['L0_H_percell']
+        self.CJ_F_percell = taper['CJ_F_percell']
+        self.floquet_filter_components = taper['floquet_filter_components']
+
+        if taper['LTLsec_H_percell'] is not None:
+            self.LTLsec_H_percell = taper['LTLsec_H_percell']
+        if taper['CTLsec_F'] is not None:
+            self.CTLsec_F = taper['CTLsec_F']
+
+        if self.verbose:
+            n_center = self.floquet_center_end - self.floquet_center_start
+            tags = []
+            if self.Z_taper:
+                tags.append(f"Z_taper={self.Z_profile}, width={self.Z_taper_width}")
+            if self.floquet_taper:
+                tags.append(f"floquet_taper={self.floquet_profile}, width={self.floquet_taper_width}")
+            print("Taper arrays: " + ("; ".join(tags) if tags else "(none)"))
+            print(f"  Center region: cells {self.floquet_center_start}-{self.floquet_center_end} "
+                  f"({n_center} cells, {self.n_periodic_sc} periodic supercells)")
+            print(f"  Per-cell taper width: {self.width} cells per side")
+            if self.Z_taper:
+                print(f"  Impedance: {self.Z0_ohm}Ω (edges) → {self.Z0_TWPA_ohm}Ω (center)")
+            if self.taper_cutoff and self.floquet_linear_varies:
+                print(f"  Cutoff: fc from {self.floquet_fc_profile[0]:.1f} GHz (edge) "
+                      f"to {self.floquet_fc_profile[self.Ntot_cell//2]:.1f} GHz (center)")
+
     def _calculate_filter_only(self):
         """Calculate parameters for filter-only dispersion."""        
         self.nTLsec = self.nTLsec & ~1  # Clear LSB to make even
@@ -856,6 +1106,16 @@ class ATLTWPADesigner:
         ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
         ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%g'))
 
+        # Overlay Floquet weight profile if active
+        if getattr(self, 'floquet_taper', False) and hasattr(self, 'floquet_weights'):
+            ax2 = ax.twinx()
+            ax2.plot(range(1, Nmax2plot_cell),
+                     self.floquet_weights[1:Nmax2plot_cell],
+                     linewidth=0.8, color=red, linestyle='--')
+            ax2.set_ylabel('Floquet weight', color=red)
+            ax2.set_ylim(0, 1.1)
+            ax2.tick_params(axis='y', labelcolor=red)
+
         fig.set_size_inches(4, 2)
 
         plt.tight_layout()
@@ -871,19 +1131,25 @@ class ATLTWPADesigner:
         if self.verbose:
             print("\n=== Calculating Linear Response ===")
 
-        # Start timer for windowed cases
+        # Start timer for windowed/tapered cases (only when cell-by-cell computation is needed)
         import time
-        if self.dispersion_type in ['periodic', 'both'] and self.window_type != 'boxcar':
+        is_tapered = bool(getattr(self, 'floquet_taper', False) or getattr(self, 'Z_taper', False))
+        floquet_linear_varies = getattr(self, 'floquet_linear_varies', False)
+        needs_timer = (is_tapered and floquet_linear_varies) or (self.dispersion_type in ['periodic', 'both'] and self.window_type != 'boxcar')
+        if needs_timer:
             start_time = time.time()
-            print(f"Note: Windowed calculation may take longer...")
+            label = "Tapered" if is_tapered else "Windowed"
+            print(f"Note: {label} calculation may take longer...")
             print(f"Started at {time.strftime('%H:%M:%S')}")
-            
+
         # Initialize ABCD matrices
         self.ABCD_sc = np.zeros((2, 2, self.n_f), dtype=complex)
         self.ABCD = np.zeros((2, 2, self.n_f), dtype=complex)
-        
-        # Calculate based on dispersion type
-        if self.dispersion_type == 'filter':
+
+        # Calculate based on dispersion type and taper state
+        if is_tapered:
+            self._calculate_tapered_response()
+        elif self.dispersion_type == 'filter':
             self._calculate_filter_response()
         elif self.dispersion_type == 'periodic' and self.window_type == 'boxcar':
             self._calculate_periodic_boxcar_response()
@@ -910,8 +1176,8 @@ class ATLTWPADesigner:
         # Calculate k (dispersion relation)
         self._calculate_dispersion()
 
-        # Print elapsed time for windowed cases
-        if self.dispersion_type in ['periodic', 'both'] and self.window_type != 'boxcar':
+        # Print elapsed time
+        if needs_timer:
             elapsed = time.time() - start_time
             mins, secs = divmod(int(elapsed), 60)
             print(f"✓ Linear response calculated in {mins:02d}:{secs:02d}")
@@ -1170,7 +1436,140 @@ class ATLTWPADesigner:
                 self.ABCD[:,:,i] = self.ABCD[:,:,i] @ ABCD_filter
                 idx_cell += 1
 
-    ########################################################################################       
+    def _tapered_cell_ABCD(self, idx_cell, w_freq, has_filters, ind_filters):
+        """Compute ABCD for a single taper cell using per-cell Z(n), fc(n), L0(n), CJ(n)."""
+        L0_cell = self.L0_H_percell[idx_cell]
+        CJ_cell = self.CJ_F_percell[idx_cell] if self.CJ_F_percell is not None else self.CJ_F
+        rem_cell = self.floquet_cell_params['LTLsec_rem_H'][idx_cell]
+        LTLsec_cell = self.LTLsec_H_percell[idx_cell] if hasattr(self, 'LTLsec_H_percell') else self.LTLsec_H
+
+        if has_filters and ind_filters is not None and idx_cell in ind_filters:
+            # Use per-cell filter components if available, else center values
+            fc = getattr(self, 'floquet_filter_components', {})
+            if idx_cell in fc:
+                f = fc[idx_cell]
+                filter_rem = f['LinfLF1_rem_H'] if self.Foster_form_L == 1 else f['L0LF2_rem_H']
+                return get_ABCD_filter(
+                    self.Foster_form_L, self.Foster_form_C, L0_cell, self.n_jj_struct,
+                    CJ_cell, f['C0LF1_F'], f['LiLF1_H'], f['CiLF1_F'], filter_rem,
+                    f['L0LF2_H'], f['CinfLF2_F'], f['LiLF2_H'], f['CiLF2_F'],
+                    f['LinfCF1_H'], f['C0CF1_F'], f['LiCF1_H'], f['CiCF1_F'],
+                    f['L0CF2_H'], f['CinfCF2_F'], f['LiCF2_H'], f['CiCF2_F'],
+                    w_freq, self.n_poles, self.n_zeros, f['LinfLF1_H'], self.nonlinearity
+                )
+            else:
+                filter_rem_arr = self.floquet_cell_params.get('filter_rem_H')
+                filter_rem = filter_rem_arr[idx_cell] if filter_rem_arr is not None else self.LinfLF1_rem_H
+                return get_ABCD_filter(
+                    self.Foster_form_L, self.Foster_form_C, L0_cell, self.n_jj_struct,
+                    CJ_cell, self.C0LF1_F, self.LiLF1_H, self.CiLF1_F, filter_rem,
+                    self.L0LF2_H, self.CinfLF2_F, self.LiLF2_H, self.CiLF2_F,
+                    self.LinfCF1_H, self.C0CF1_F, self.LiCF1_H, self.CiCF1_F,
+                    self.L0CF2_H, self.CinfCF2_F, self.LiCF2_H, self.CiCF2_F,
+                    w_freq, self.n_poles, self.n_zeros, self.LinfLF1_H, self.nonlinearity
+                )
+        else:
+            return calculate_ABCD_TLsec(
+                L0_cell, self.n_jj_struct, CJ_cell, rem_cell,
+                self.CTLsec_F[idx_cell], w_freq, LTLsec_cell, self.nonlinearity
+            )
+
+    def _tapered_cell_is_filter(self, idx_cell):
+        """Check if a cell is a filter cell based on its position.
+
+        For both 'filter' and 'both' dispersion the filter cells recur every
+        Ncpersc_cell. `ind_g_C_with_filters` lists positions *within one
+        supercell* (not absolute indices along the whole line), so we modulo
+        by Ncpersc_cell before checking — otherwise only one cell in the whole
+        line would actually be treated as a filter cell.
+        """
+        if self.dispersion_type == 'filter':
+            return (idx_cell % self.Ncpersc_cell) == (self.nTLsec // 2)
+        elif self.dispersion_type == 'both':
+            ind = getattr(self, 'ind_g_C_with_filters', None)
+            if not ind:
+                return False
+            cell_in_sc = idx_cell % self.Ncpersc_cell
+            return any(cell_in_sc == (pos % self.Ncpersc_cell) for pos in ind)
+        return False
+
+    def _calculate_tapered_response(self):
+        """Calculate linear response with either taper (impedance or Floquet nonlinearity).
+
+        Three-part structure: left taper (supercell-by-supercell) → center (matrix_power)
+        → right taper. Each taper supercell preserves the internal cell structure while
+        varying Z(n), fc(n) per cell.
+
+        When neither Z(n) nor fc(n) varies along the line, the linear ABCD is the same
+        as the untapered case — delegates to the matching non-tapered response method.
+        """
+        # Shortcut: if Z and fc are constant, the linear ABCD is uniform — use the
+        # untapered response method (the Floquet nonlinearity may still vary cell-to-cell
+        # in the netlist for KI or for JJ with taper_cutoff=False, but it doesn't affect
+        # the linear ABCD).
+        if not self.floquet_linear_varies:
+            if self.dispersion_type == 'filter':
+                self._calculate_filter_response()
+            elif self.dispersion_type == 'periodic':
+                self._calculate_periodic_boxcar_response()
+            elif self.dispersion_type == 'both':
+                self._calculate_both_boxcar_response()
+            return
+
+        width = self.width
+        n_periodic_sc = self.n_periodic_sc
+        Ncpersc = self.Ncpersc_cell
+        n_taper_sc = width // Ncpersc
+
+        for i in range(self.n_f):
+            self.ABCD[:,:,i] = np.eye(2)
+
+            # 1. Left taper (supercell-by-supercell)
+            for sc in range(n_taper_sc):
+                ABCD_sc = np.eye(2)
+                for j in range(Ncpersc):
+                    idx = sc * Ncpersc + j
+                    is_filt = self._tapered_cell_is_filter(idx)
+                    ABCD_sc = ABCD_sc @ self._tapered_cell_ABCD(
+                        idx, self.w[i], is_filt, {idx} if is_filt else None)
+                self.ABCD[:,:,i] = self.ABCD[:,:,i] @ ABCD_sc
+
+            # 2. Center (one supercell with nominal params, raised to matrix_power)
+            if n_periodic_sc > 0:
+                ABCD_sc_center = np.eye(2)
+                for j in range(Ncpersc):
+                    center_idx = width + j
+                    if self._tapered_cell_is_filter(center_idx):
+                        ABCD_cell = get_ABCD_filter(
+                            self.Foster_form_L, self.Foster_form_C, self.L0_H, self.n_jj_struct,
+                            self.CJ_F, self.C0LF1_F, self.LiLF1_H, self.CiLF1_F, self.LinfLF1_rem_H,
+                            self.L0LF2_H, self.CinfLF2_F, self.LiLF2_H, self.CiLF2_F,
+                            self.LinfCF1_H, self.C0CF1_F, self.LiCF1_H, self.CiCF1_F,
+                            self.L0CF2_H, self.CinfCF2_F, self.LiCF2_H, self.CiCF2_F,
+                            self.w[i], self.n_poles, self.n_zeros, self.LinfLF1_H, self.nonlinearity
+                        )
+                    else:
+                        ABCD_cell = calculate_ABCD_TLsec(
+                            self.L0_H, self.n_jj_struct, self.CJ_F, self.LTLsec_rem_H,
+                            self.CTLsec_F[center_idx], self.w[i], self.LTLsec_H, self.nonlinearity
+                        )
+                    ABCD_sc_center = ABCD_sc_center @ ABCD_cell
+
+                self.ABCD_sc[:,:,i] = ABCD_sc_center
+                self.ABCD[:,:,i] = self.ABCD[:,:,i] @ np.linalg.matrix_power(ABCD_sc_center, n_periodic_sc)
+
+            # 3. Right taper (supercell-by-supercell)
+            right_start = width + n_periodic_sc * Ncpersc
+            for sc in range(n_taper_sc):
+                ABCD_sc = np.eye(2)
+                for j in range(Ncpersc):
+                    idx = right_start + sc * Ncpersc + j
+                    is_filt = self._tapered_cell_is_filter(idx)
+                    ABCD_sc = ABCD_sc @ self._tapered_cell_ABCD(
+                        idx, self.w[i], is_filt, {idx} if is_filt else None)
+                self.ABCD[:,:,i] = self.ABCD[:,:,i] @ ABCD_sc
+
+    ########################################################################################
 
     def _calculate_dispersion(self):
         """Calculate k (dispersion relation) from ABCD matrices."""
@@ -1496,9 +1895,11 @@ class ATLTWPADesigner:
                 elif self.L0LF2_H == np.inf and self.CinfCF2_F == 0:
                     v_cellpersec = np.mean(1 / np.sqrt(check_flat(self.LiLF2_H, 0) * check_flat(self.CiCF2_F, 0)))
             
-            # Include transmission line sections
-            v_cellpersec = (v_cellpersec / self.Ncpersc_cell + 
-                           self.nTLsec / np.sqrt(self.LTLsec_H * self.CTLsec_F) / self.Ncpersc_cell)
+            # Include transmission line sections (use center value if CTLsec_F is an array)
+            CTLsec_center = np.mean(self.CTLsec_F) if hasattr(self.CTLsec_F, '__len__') else self.CTLsec_F
+            LTLsec_center = self.LTLsec_H
+            v_cellpersec = (v_cellpersec / self.Ncpersc_cell +
+                           self.nTLsec / np.sqrt(LTLsec_center * CTLsec_center) / self.Ncpersc_cell)
             self.v_cellpernsec = v_cellpersec * 1E-9
         elif self.dispersion_type == 'periodic' or self.dispersion_type == 'both':
             v_cellpersec = self.v_cellpernsec * 1E9
@@ -1789,6 +2190,21 @@ class ATLTWPADesigner:
             config['Id_uA'] = save_parameter_intelligently(self.Id_uA)
             config['L0_pH'] = save_parameter_intelligently(self.L0_pH)
             
+        # Taper parameters (independent Z and Floquet tapers)
+        if getattr(self, 'Z_taper', False):
+            config['Z_taper'] = True
+            config['Z_taper_width'] = save_parameter_intelligently(self.Z_taper_width)
+            config['Z_profile'] = self.Z_profile
+            if getattr(self, 'klopfenstein_A', None) is not None:
+                config['klopfenstein_A'] = save_parameter_intelligently(self.klopfenstein_A)
+        if getattr(self, 'floquet_taper', False):
+            config['floquet_taper'] = True
+            config['floquet_profile'] = self.floquet_profile
+            config['floquet_taper_width'] = save_parameter_intelligently(self.floquet_taper_width)
+            config['rf_squid_constant_plasma'] = self.rf_squid_constant_plasma
+        if getattr(self, 'Z_taper', False) or getattr(self, 'floquet_taper', False):
+            config['taper_cutoff'] = self.taper_cutoff
+
         # Phase-matching parameters (always needed)
         config['WM'] = self.WM
         config['dir_prop_PA'] = self.dir_prop_PA
@@ -1835,8 +2251,11 @@ class ATLTWPADesigner:
             circuit['LTLsec_rem_H'] = save_parameter_intelligently(self.LTLsec_rem_H)
             
         # CTLsec_F - only when nTLsec > 0 and handle differently for periodic vs non-periodic
+        # When Floquet with varying linear design, CTLsec_F is reconstructed by netlist builder
         if hasattr(self, 'CTLsec_F') and getattr(self, 'nTLsec', 0) > 0:
-            if self.dispersion_type not in ['periodic', 'both']:
+            if getattr(self, 'floquet_linear_varies', False):
+                pass  # reconstructed from Floquet profile params
+            elif self.dispersion_type not in ['periodic', 'both']:
                 circuit['CTLsec_F'] = self.CTLsec_F
                 
         # JJ-specific components

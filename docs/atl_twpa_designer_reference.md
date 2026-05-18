@@ -65,6 +65,32 @@ designer = ATLTWPADesigner(
 'alpha': 0.0                         # float: Window parameter (0-1)
 'n_filters_per_sc': 1                # int: Filters per supercell
 
+# Impedance taper parameters (independent of Floquet nonlinearity taper)
+'Z_taper': None                      # bool or None: Enable the impedance taper. None (default) =
+                                     #   auto-enable iff Z0_TWPA_ohm != Z0_ohm. Setting it explicitly
+                                     #   to True or False overrides the auto behavior; explicitly
+                                     #   disabling it with mismatched impedances raises ValueError.
+'Z_taper_width': 0.3                 # float: Fraction of the line used for the Z ramp (each side is
+                                     #   Z_taper_width/2). No-op when Z_taper is disabled.
+'Z_profile': 'linear'                # str: 'linear' or 'klopfenstein'. Z(n) shape between Z0_ohm
+                                     #   (edges) and Z0_TWPA_ohm (center). Both force exact endpoint
+                                     #   matching. Klopfenstein is equiripple-optimal (minimizes max
+                                     #   in-band reflection / low-frequency ripples).
+'klopfenstein_A': None               # float or None: Klopfenstein design parameter. None →
+                                     #   auto from cosh⁻¹(Γ_0/0.05) (5% max ripple target).
+
+# Floquet nonlinearity taper parameters (independent of impedance taper)
+'floquet_taper': False               # bool: Enable Floquet nonlinearity taper
+'floquet_profile': 'gaussian'        # str: 'gaussian' or 'tukey'
+'floquet_taper_width': 0.3           # float: Fraction of the line used for the nonlinearity ramp
+                                     #   (each side is floquet_taper_width/2).
+'taper_cutoff': False                # bool: Controls which of C(n) and fc(n) absorbs the per-cell
+                                     #   variation. False (default) → fc constant, C(n) varies.
+                                     #   True → C constant, fc(n) varies. Forced True for rf_squid.
+'rf_squid_constant_plasma': True     # bool: rf_squid only — add extra shunt cap (Cjx) so the
+                                     #   rf_squid plasma frequency stays constant along the line.
+                                     #   Default True; needed for harmonic balance convergence.
+
 # Nonlinearity type
 'nonlinearity': 'JJ'                 # str: 'JJ' or 'KI'
 'Id_uA': 0                           # float: DC current bias
@@ -135,6 +161,54 @@ The filter parameters accept flexible input formats for user convenience:
 ```
 
 All formats are automatically converted to numpy arrays internally for calculations.
+
+#### Tapers (impedance and Floquet nonlinearity)
+
+The designer supports two independent edge tapers — an **impedance taper** that ramps the cell impedance from `Z0_ohm` at the device edges to `Z0_TWPA_ohm` in the center, and a **Floquet nonlinearity taper** that ramps the nonlinear element strength from weak at the edges to full strength in the center. They can be used independently or together, with possibly different widths. The Floquet nonlinearity taper is mutually exclusive with the `window_type`/`alpha` apodization.
+
+```python
+# Impedance taper only (auto-enabled when Z0_TWPA_ohm != Z0_ohm).
+designer = ATLTWPADesigner({
+    'Z0_TWPA_ohm': 100,             # → environment 50 Ω, center 100 Ω, taper between them
+    'Z_taper_width': 0.3,
+    'Z_profile': 'klopfenstein',    # 'linear' or 'klopfenstein'
+})
+
+# Floquet nonlinearity taper only.
+designer = ATLTWPADesigner({
+    'floquet_taper': True,
+    'floquet_profile': 'gaussian',  # 'gaussian' or 'tukey'
+    'floquet_taper_width': 0.3,
+    'taper_cutoff': True,           # True → fc(n) varies, C constant
+    'stopbands_config_GHz': {27: {'max': 4}},
+})
+
+# Both tapers, possibly with different widths.
+designer = ATLTWPADesigner({
+    'Z0_TWPA_ohm': 100,
+    'Z_taper_width': 0.2,           # narrower impedance ramp
+    'Z_profile': 'klopfenstein',
+    'floquet_taper': True,
+    'floquet_taper_width': 0.5,     # broader nonlinearity ramp
+    'taper_cutoff': False,
+})
+```
+
+Both tapers are defined within the total device length (not additive). The per-cell numeric region is the union of the two taper regions; the symbolic-supercell center region is where *both* are at unity.
+
+- **Impedance taper** (`Z_taper`, `Z_taper_width`, `Z_profile`, `klopfenstein_A`): When enabled, `Z(n)` transitions from the environment impedance `Z0_ohm` at the device edges to `Z0_TWPA_ohm` at the taper→center boundary. `Z_taper` defaults to `None`, which auto-enables the taper iff `Z0_TWPA_ohm != Z0_ohm`. Explicitly setting `Z_taper=False` with mismatched impedances raises an error (the line would have an impedance step). Two profile shapes:
+  - **`'linear'`** (default): `Z(n)` is linear in cell index.
+  - **`'klopfenstein'`**: equiripple-optimal Klopfenstein taper (1956). For the same taper length and impedance ratio, this minimizes the maximum in-band reflection (the standing-wave ripples in S21 at low frequency). Design parameter `A` (config `klopfenstein_A`) controls the bandwidth/ripple trade-off; auto-default targets 5% max ripple via `A = cosh⁻¹(Γ_0/0.05)`.
+
+  Both shapes force `Z(0) = Z0_ohm` at the device edges and `Z(taper_end) = Z0_TWPA_ohm` at the taper→center boundary exactly.
+
+- **Floquet nonlinearity taper** (`floquet_taper`, `floquet_profile`, `floquet_taper_width`): When enabled, the per-cell nonlinearity scales by `w(n) ∈ [0, 1]`. Two profile shapes: Gaussian (`w(n) = 1 - exp(-n²/(2σ²))`) and Tukey (half-cosine ramp).
+
+- **`taper_cutoff`**: Controls whether `fc(n)` or `C(n)` absorbs the per-cell variation when either taper is active. False (default) keeps `fc(n) = fc_center` and lets `C(n)` vary; True keeps `C(n) = C_center` and lets `fc(n)` vary. For rf_squid this is forced to True (the asymmetry of `L0(edge) = Lg > L0(center)` rules out the False mode — see engineering notes). For KI without an impedance taper, the cell is uniform regardless of the flag (since `L0(n)` is independent of `w(n)` — only `Istar(n) = Istar_center / w(n)` varies, which has no effect on the linear cell).
+
+- **`rf_squid_constant_plasma`** (rf_squid only, default True): Adds an extra shunt cap `Cjx(n)` in parallel with the rf_squid so that `(Lj_dyn || Lg) * Cj_total` stays constant along the line. Without this, the rf_squid plasma frequency varies 3× from edge to center, causing harmonic balance convergence problems. With this enabled the line looks uniform to high pump harmonics and convergence is dramatically better.
+
+See the engineering notes (`docs/engineering_notes.md`) for the full design rationale.
 
 ---
 

@@ -22,6 +22,8 @@ np.seterr(divide='ignore', invalid='ignore')  # Suppress divide by zero and inva
 
 from scipy.optimize import basinhopping, minimize
 from scipy.stats import qmc  # For Latin Hypercube Sampling in Hermitian solver
+from scipy.special import iv as _bessel_iv  # Modified Bessel I_n, for Klopfenstein φ
+from scipy.integrate import quad as _quad_integrate  # for Klopfenstein φ integral
 
 
 ################################################################################################
@@ -1314,6 +1316,705 @@ def create_windowed_transmission_line(g_C_supercell, Nsc_cell, window_type='tuke
 
 ################################################################################################
 ################################################################################################
+# Floquet taper utilities
+
+def _klopfenstein_phi(z, A):
+    """Klopfenstein φ function used by the equiripple impedance taper.
+
+    φ(z, A) = ∫₀^z I₁(A·√(1−y²)) / (A·√(1−y²)) dy
+
+    Odd in z; defined on |z| ≤ 1. For |z| > 1 the integrand is imaginary and we
+    clamp to ±1 (Klopfenstein's profile is only defined inside the taper).
+
+    Parameters
+    ----------
+    z : float
+        Position parameter, normally in [-1, 1].
+    A : float
+        Klopfenstein design parameter.
+
+    Returns
+    -------
+    float
+        Value of φ(z, A).
+    """
+    if abs(z) < 1e-15:
+        return 0.0
+    sign = 1.0 if z > 0 else -1.0
+    z_abs = min(abs(z), 1.0)
+
+    def integrand(y):
+        u = 1.0 - y * y
+        if u <= 0.0:
+            return 0.0
+        s = A * np.sqrt(u)
+        if s < 1e-12:
+            # I_1(x)/x → 1/2 as x → 0
+            return 0.5
+        return _bessel_iv(1, s) / s
+
+    val, _ = _quad_integrate(integrand, 0.0, z_abs)
+    return sign * val
+
+
+def compute_linear_Z_profile(Ntot_cell, taper_cells, Z_env, Z_TWPA):
+    """Linear-in-cell-index impedance profile across the device.
+
+    The taper runs linearly from Z_env at the edge cell to Z_TWPA at the last
+    taper cell; the center cells are clamped at Z_TWPA. Mirrored on the right.
+
+    Parameters
+    ----------
+    Ntot_cell : int
+        Total number of cells.
+    taper_cells : int
+        Number of cells per taper region.
+    Z_env : float
+        Environment impedance (at the device edges).
+    Z_TWPA : float
+        Center / design impedance.
+
+    Returns
+    -------
+    Z_profile : np.ndarray, shape (Ntot_cell,)
+        Per-cell impedance.
+    """
+    Z_profile = np.full(Ntot_cell, float(Z_TWPA))
+    if Z_env == Z_TWPA or taper_cells <= 0:
+        return Z_profile
+    if taper_cells == 1:
+        Z_profile[0] = Z_env
+        Z_profile[-1] = Z_env
+        return Z_profile
+
+    # Left taper: cell index n in [0, taper_cells-1] maps linearly to [Z_env, Z_TWPA]
+    n = np.arange(taper_cells)
+    taper_vals = Z_env + (Z_TWPA - Z_env) * n / (taper_cells - 1)
+    Z_profile[:taper_cells] = taper_vals
+    # Right taper is the mirror
+    Z_profile[Ntot_cell - taper_cells:] = taper_vals[::-1]
+    return Z_profile
+
+
+def compute_klopfenstein_Z_profile(Ntot_cell, taper_cells, Z_env, Z_TWPA,
+                                    A=None, max_ripple=0.05):
+    """Klopfenstein (equiripple-optimal) impedance profile across the device.
+
+    Within each taper region, the profile is the rescaled Klopfenstein taper
+
+        ln(Z(n)/sqrt(Z_env · Z_TWPA)) = Γ_0 · φ(2n/(taper_cells-1) − 1, A) / φ(1, A)
+
+    where Γ_0 = ½·ln(Z_TWPA/Z_env) is the DC reflection magnitude and φ(z, A) is
+    the Klopfenstein function (integral involving I₁). The rescaling by 1/φ(1, A)
+    forces Z(0) = Z_env and Z(taper_cells−1) = Z_TWPA exactly, sacrificing a
+    small amount of canonical-Klopfenstein equiripple optimality for clean
+    port/center matching. Center cells stay at Z_TWPA. Right taper is mirrored.
+
+    Parameters
+    ----------
+    Ntot_cell : int
+        Total number of cells.
+    taper_cells : int
+        Number of cells per taper region.
+    Z_env : float
+        Environment impedance (at the device edges).
+    Z_TWPA : float
+        Center / design impedance.
+    A : float, optional
+        Klopfenstein design parameter. Larger A ⇒ sharper cutoff and larger
+        in-band ripple. If None (default), computed from `max_ripple` via the
+        standard relation A = cosh⁻¹(Γ_0 / Γ_m).
+    max_ripple : float, optional
+        Target maximum in-band reflection amplitude (Γ_m), used only when
+        A is None. Default 0.05.
+
+    Returns
+    -------
+    Z_profile : np.ndarray, shape (Ntot_cell,)
+        Per-cell impedance.
+    """
+    Z_profile = np.full(Ntot_cell, float(Z_TWPA))
+    if Z_env == Z_TWPA or taper_cells <= 0:
+        return Z_profile
+    if taper_cells == 1:
+        Z_profile[0] = Z_env
+        Z_profile[-1] = Z_env
+        return Z_profile
+
+    Gamma_0 = 0.5 * np.log(Z_TWPA / Z_env)
+    if A is None:
+        ratio = abs(Gamma_0) / max(max_ripple, 1e-12)
+        # cosh⁻¹ requires argument ≥ 1; clamp gracefully.
+        A = float(np.arccosh(max(ratio, 1.0)))
+        if A < 1e-6:
+            A = 1e-6  # numerically safe lower bound
+    A = float(A)
+
+    phi_max = _klopfenstein_phi(1.0, A)
+    if abs(phi_max) < 1e-12:
+        # Degenerate case (A → 0): fall back to linear.
+        return compute_linear_Z_profile(Ntot_cell, taper_cells, Z_env, Z_TWPA)
+
+    # Build the left-taper profile, then mirror.
+    taper_vals = np.empty(taper_cells)
+    log_geo_mean = 0.5 * np.log(Z_env * Z_TWPA)
+    for n in range(taper_cells):
+        z = 2.0 * n / (taper_cells - 1) - 1.0
+        phi_val = _klopfenstein_phi(z, A)
+        taper_vals[n] = np.exp(log_geo_mean + Gamma_0 * phi_val / phi_max)
+
+    Z_profile[:taper_cells] = taper_vals
+    Z_profile[Ntot_cell - taper_cells:] = taper_vals[::-1]
+    return Z_profile
+
+
+def compute_floquet_profile(Ntot_cell, profile_type='gaussian', floquet_taper_width=0.3,
+                            w_min=0.05, w_target=0.95):
+    """
+    Compute the Floquet nonlinearity weight profile w(n) over the full device length.
+
+    The returned weight profile drives the **nonlinearity** taper only:
+    Istar(n) for KI, Lj(n) for bare JJ, beta_L_eff(n) for rf_squid. The impedance
+    ramp is independent (see `compute_linear_Z_profile` /
+    `compute_klopfenstein_Z_profile`). See "Floquet nonlinearity taper" in
+    docs/engineering_notes.md.
+
+    Parameters
+    ----------
+    Ntot_cell : int
+        Total number of cells.
+    profile_type : str
+        'gaussian' or 'tukey'.
+    floquet_taper_width : float
+        Total fraction of the line used for the nonlinearity ramp. Each side is
+        floquet_taper_width/2 of the line, the center is (1 - floquet_taper_width).
+        E.g., floquet_taper_width=0.5 means 25% taper per side, 50% center.
+    w_min : float
+        Minimum weight at the device edges. Default 0.05. Kept above 0 to avoid
+        singularities in the nonlinearity branch (rf_squid `c1_cp = 1/beta_L_eff
+        + cos(phi_dc)` and bare-JJ `Ic = φ₀/Lj` both blow up at w → 0).
+    w_target : float
+        Target weight at the boundary between taper and center.
+        Default 0.95: the first center cell has w = 0.95 (Gaussian). The
+        Gaussian then drifts up to ~`w_min + (w_target - w_min)/w_target`
+        (≈ 0.997 for defaults) as you go deeper into the center. Tukey hits
+        exactly 1.0 at the boundary and stays at 1.0 in the center.
+
+    Returns
+    -------
+    weights : np.ndarray, shape (Ntot_cell,)
+        Taper weights in [w_min, ~1], w_min at edges, ~1 in center.
+    center_start : int
+        First cell index in center region.
+    center_end : int
+        Last cell index + 1 in center region.
+    """
+    n = np.arange(Ntot_cell)
+    taper_cells = int(floquet_taper_width * Ntot_cell / 2)
+
+    if profile_type == 'gaussian':
+        if taper_cells <= 0:
+            weights = np.ones(Ntot_cell)
+        else:
+            sigma = taper_cells / np.sqrt(-2 * np.log(1 - w_target))
+            g_left = 1 - np.exp(-n ** 2 / (2 * sigma ** 2))
+            g_right = 1 - np.exp(-(Ntot_cell - 1 - n) ** 2 / (2 * sigma ** 2))
+            g = np.minimum(g_left, g_right)
+            weights = w_min + (w_target - w_min) * g / w_target
+    elif profile_type == 'tukey':
+        weights = np.ones(Ntot_cell)
+        if taper_cells > 0:
+            raw_taper = 0.5 * (1 - np.cos(np.pi * np.arange(taper_cells) / taper_cells))
+            taper = w_min + (1 - w_min) * raw_taper
+            weights[:taper_cells] = taper
+            weights[-taper_cells:] = taper[::-1]
+    else:
+        raise ValueError(f"Unknown Floquet profile type: {profile_type}")
+
+    center_start = taper_cells
+    center_end = Ntot_cell - taper_cells
+    if center_start >= center_end:
+        center_start = Ntot_cell // 2
+        center_end = center_start + 1
+
+    return weights, center_start, center_end
+
+
+def compute_floquet_cell_parameters(weights, nonlinearity, jj_structure_type,
+                                     LJ0_H, Lg_H, beta_L, phi_dc, CJ_F, Ic_JJ_A,
+                                     Istar_A, Id_A, L0_pH,
+                                     LTLsec_H, n_jj_struct,
+                                     LinfLF1_H=None, L0LF2_H=None, Foster_form_L=1,
+                                     rf_squid_constant_plasma=False,
+                                     L0_H_KI_percell=None):
+    """
+    Compute per-cell nonlinearity parameters from Floquet weights.
+
+    The Floquet weight w(n) scales the nonlinear inductance at each cell.
+    The remainder inductance adjusts so the total series inductance is preserved.
+
+    Parameters
+    ----------
+    weights : np.ndarray, shape (Ntot_cell,)
+        Floquet taper weights in (0, 1].
+    nonlinearity : str
+        'JJ' or 'KI'.
+    jj_structure_type : str
+        'jj' or 'rf_squid' (only used when nonlinearity='JJ').
+    LJ0_H : float or None
+        Nominal JJ inductance (center value).
+    Lg_H : float or None
+        Geometric inductance for rf_squid (stays constant in taper).
+    beta_L : float or None
+        RF-SQUID participation ratio (center value).
+    phi_dc : float
+        DC flux bias.
+    CJ_F : float or None
+        Junction capacitance (center value).
+    Ic_JJ_A : float or None
+        Critical current in Amps.
+    Istar_A : float or None
+        KI scaling current.
+    Id_A : float or None
+        KI DC bias current.
+    L0_pH : float or None
+        KI inductance per cell in pH.
+    LTLsec_H : float
+        Total TL section inductance.
+    n_jj_struct : int
+        Number of JJ structures per cell.
+    LinfLF1_H : float or None
+        Total series inductor from Foster form 1 filter design.
+    L0LF2_H : float or None
+        Total series inductor from Foster form 2 filter design.
+    Foster_form_L : int
+        1 or 2.
+    rf_squid_constant_plasma : bool
+        rf_squid only. If True, populate 'Cj_extra_F' with the per-cell extra
+        shunt capacitance needed to keep the plasma frequency (Lj||Lg)*Cj_total
+        constant along the taper:
+        Cj_total(n) = CJ_F * (1 + beta_L*w(n)*cos(phi_dc)) / (1 + beta_L*cos(phi_dc))
+        Cjx(n)      = max(0, Cj_total(n) - CJ_F * w(n))
+        If False, 'Cj_extra_F' is filled with zeros. Ignored for bare JJ and KI.
+    L0_H_KI_percell : np.ndarray, optional
+        KI only. Per-cell kinetic inductance array. Used when the impedance and/or
+        cutoff is tapered along the line and L0(n) needs to follow the local Z(n)
+        and fc(n) (see "Floquet taper for KI nonlinearity" in engineering_notes.md).
+        If None, L0(n) = L0_pH * 1e-12 (constant) as a backward-compat default.
+        Ignored for JJ and rf_squid.
+
+    Returns
+    -------
+    dict with per-cell arrays:
+        'L0_H' : np.ndarray -- per-cell effective NL inductance (Lj||Lg for rf_squid)
+        'Lj_H' : np.ndarray -- per-cell JJ kinetic inductance (= L0_H for bare JJ;
+                 = Lg/(beta_L*w(n)) for rf_squid). Used by the netlist builder for
+                 the JJ component of the rf-SQUID, distinct from the parallel L0.
+        'CJ_F' : np.ndarray or None -- per-cell junction capacitance
+        'Cj_extra_F' : np.ndarray -- per-cell extra shunt cap for rf_squid_constant_plasma
+                       (only present for jj_structure_type='rf_squid'; zeros when
+                       rf_squid_constant_plasma=False)
+        'LTLsec_rem_H' : np.ndarray -- per-cell TL section remainder
+        'filter_rem_H' : np.ndarray or None -- per-cell filter section remainder
+        'c1_taylor' through 'c4_taylor' : np.ndarray -- per-cell Taylor coefficients
+        'epsilon_perA' : np.ndarray -- per-cell epsilon
+        'xi_perA2' : np.ndarray -- per-cell xi
+    """
+    Ntot = len(weights)
+    result = {}
+
+    if nonlinearity == 'JJ':
+        if jj_structure_type == 'jj':
+            # Bare JJ: Lj scales by weight, CJ inversely (keep fJ constant)
+            L0_H_arr = LJ0_H * weights
+            CJ_F_arr = CJ_F / np.maximum(weights, 1e-30)
+            # For bare JJ, Lj_dyn = L0_H (no Lg branch). Expose for consistency.
+            result['Lj_H'] = L0_H_arr
+            # Taylor coefficients are fixed for bare JJ
+            result['c1_taylor'] = np.zeros(Ntot)
+            result['c2_taylor'] = np.full(Ntot, 0.5)
+            result['c3_taylor'] = np.zeros(Ntot)
+            result['c4_taylor'] = np.full(Ntot, 5.0 / 24.0)
+            # Nonlinearity coefficients (per A², matching the designer's center-cell
+            # formula (3*c2² - c1*c3)/(2*c1⁴)/Ic² with bare-JJ c1=1, c2=0, c3=-1).
+            Ic_arr = phi0 / L0_H_arr
+            c1_cp = 1.0  # c1_currentphase for bare JJ at phi_dc=0
+            c2_cp = 0.0
+            result['epsilon_perA'] = np.zeros(Ntot)
+            result['xi_perA2'] = 0.5 / (Ic_arr ** 2)
+
+        elif jj_structure_type == 'rf_squid':
+            # RF-SQUID: scale beta_L by w(n). Small beta_L at edges = linear (L0 ≈ Lg).
+            # The effective inductance L0 = Lg/(1 + beta_L*w(n)*cos(phi_dc)) is NOT
+            # proportional to w(n) — it's a nonlinear function.
+            beta_L_eff = beta_L * weights
+            cos_phi = np.cos(phi_dc)
+            sin_phi = np.sin(phi_dc)
+            denom1 = 1 + beta_L_eff * cos_phi
+
+            L0_H_arr = Lg_H / denom1
+            # CJ scales inversely with Lj = Lg/beta_L_eff to keep plasma freq constant
+            Lj_arr = Lg_H / np.maximum(beta_L_eff, 1e-30)
+            CJ_F_arr = CJ_F * (LJ0_H / Lj_arr)
+            # Expose Lj_dyn (the JJ kinetic inductance per cell) so the netlist
+            # builder can use it for the JJ component (instead of L0_H, which
+            # is the effective parallel-combined inductance).
+            result['Lj_H'] = Lj_arr
+
+            # Optional: extra shunt cap to keep the rf_squid plasma frequency
+            # ((Lj||Lg) * Cj_total) constant along the line. The intrinsic JJ
+            # cap scales as CJ_F * w(n), but the parallel L (= Lg/(1+beta_L*w*cos))
+            # varies differently. Adding an extra cap brings the total to
+            # Cj_total(n) = CJ_F * (1 + beta_L*w*cos)/(1 + beta_L*cos) so that
+            # (Lj||Lg)(n) * Cj_total(n) = (Lj||Lg)_center * CJ_F.
+            if rf_squid_constant_plasma:
+                denom_center = 1 + beta_L * cos_phi
+                Cj_total = CJ_F * denom1 / denom_center  # denom1 = 1 + beta_L_eff*cos_phi
+                result['Cj_extra_F'] = np.maximum(0, Cj_total - CJ_F_arr)
+            else:
+                result['Cj_extra_F'] = np.zeros(Ntot)
+
+            result['c1_taylor'] = beta_L_eff * sin_phi / denom1
+            result['c2_taylor'] = beta_L_eff * (cos_phi + beta_L_eff * (1 + sin_phi ** 2)) / (2 * denom1)
+
+            denom3 = denom1 ** 3
+            result['c3_taylor'] = beta_L_eff * sin_phi * (
+                6 * beta_L_eff ** 2 * sin_phi ** 2 + 5 * beta_L_eff ** 2 * cos_phi ** 2
+                + 4 * beta_L_eff * cos_phi - 1) / (6 * denom3)
+
+            denom4 = denom1 ** 4
+            result['c4_taylor'] = beta_L_eff * (
+                -cos_phi + 3 * beta_L_eff * cos_phi ** 2
+                + 9 * beta_L_eff ** 2 * cos_phi ** 3
+                + 5 * beta_L_eff ** 3 * cos_phi ** 4
+                - 8 * beta_L_eff * sin_phi ** 2
+                + 20 * beta_L_eff ** 2 * cos_phi * sin_phi ** 2
+                + 28 * beta_L_eff ** 3 * cos_phi ** 2 * sin_phi ** 2
+                + 24 * beta_L_eff ** 3 * sin_phi ** 4
+            ) / (24 * denom4)
+
+            c1_cp = (1 / beta_L_eff + cos_phi)
+            c2_cp = -sin_phi
+            Ic_JJ_arr = phi0 / (Lg_H / beta_L_eff)
+            result['epsilon_perA'] = -c2_cp / (c1_cp ** 2) / Ic_JJ_arr
+            result['xi_perA2'] = (3 * c2_cp ** 2 - c1_cp * (-cos_phi)) / (2 * c1_cp ** 4) / (Ic_JJ_arr ** 2)
+
+        result['CJ_F'] = CJ_F_arr
+
+    elif nonlinearity == 'KI':
+        if L0_H_KI_percell is not None:
+            L0_H_arr = np.asarray(L0_H_KI_percell, dtype=float)
+            if L0_H_arr.shape != (Ntot,):
+                raise ValueError(
+                    f"L0_H_KI_percell shape {L0_H_arr.shape} does not match Ntot={Ntot}")
+        else:
+            L0_val = L0_pH * 1e-12
+            L0_H_arr = np.full(Ntot, L0_val)
+        Istar_eff = Istar_A / np.maximum(weights, 1e-30)
+
+        result['epsilon_perA'] = 2 * Id_A / (Istar_eff ** 2 + Id_A ** 2)
+        result['xi_perA2'] = 1.0 / (Istar_eff ** 2 + Id_A ** 2)
+
+        result['c1_taylor'] = phi0 / L0_H_arr * result['epsilon_perA']
+        result['c2_taylor'] = 0.5 * (phi0 / L0_H_arr) ** 2 * (2 * result['xi_perA2'] - 3 * result['epsilon_perA'] ** 2)
+        result['c3_taylor'] = None
+        result['c4_taylor'] = None
+        result['CJ_F'] = None
+
+    result['L0_H'] = L0_H_arr
+
+    # TL section remainder
+    result['LTLsec_rem_H'] = np.maximum(0, LTLsec_H - n_jj_struct * L0_H_arr)
+
+    # Filter section remainder (for the active Foster form)
+    if Foster_form_L == 1 and LinfLF1_H is not None and not np.any(np.isinf(LinfLF1_H)):
+        L_total = np.atleast_1d(LinfLF1_H)
+        if L_total.size == 1:
+            result['filter_rem_H'] = np.maximum(0, float(L_total.item()) - n_jj_struct * L0_H_arr)
+        else:
+            result['filter_rem_H'] = np.maximum(0, L_total[:, np.newaxis] - n_jj_struct * L0_H_arr)
+    elif Foster_form_L == 2 and L0LF2_H is not None and not np.any(np.isinf(L0LF2_H)):
+        L_total = np.atleast_1d(L0LF2_H)
+        if L_total.size == 1:
+            result['filter_rem_H'] = np.maximum(0, float(L_total.item()) - n_jj_struct * L0_H_arr)
+        else:
+            result['filter_rem_H'] = np.maximum(0, L_total[:, np.newaxis] - n_jj_struct * L0_H_arr)
+    else:
+        result['filter_rem_H'] = None
+
+    return result
+
+
+def compute_taper_arrays(
+        Ntot_cell, Ncpersc_cell,
+        Z_taper, Z_taper_width, Z_profile, klopfenstein_A,
+        floquet_taper, floquet_taper_width, floquet_profile,
+        taper_cutoff,
+        Z0_ohm, Z0_TWPA_ohm, fc_TLsec_GHz,
+        LTLsec_H_center, L0_H_center, g_L, g_C,
+        nonlinearity, jj_structure_type='jj',
+        phi_dc=0.0, beta_L=None,
+        LJ0_H=None, Lg_H=None, CJ_F=None,
+        Ic_JJ_A=None, Istar_A=None, Id_A=None,
+        L0_pH=None, n_jj_struct=1,
+        LinfLF1_H=None, L0LF2_H=None,
+        Foster_form_L=1, Foster_form_C=1,
+        zero_at_zero=True, select_one_form='C',
+        f_zeros_GHz=None, f_poles_GHz=None, dispersion_type='periodic',
+        g_C_mod=None, rf_squid_constant_plasma=False):
+    """Compute all per-cell taper arrays — impedance, nonlinearity weight, and derived linear/NL params.
+
+    This is the single source of truth for the tapered-TWPA per-cell design and
+    is called by both `atl_twpa_designer._compute_taper_arrays` and the netlist
+    builder's workspace preparation. The two tapers (impedance and Floquet
+    nonlinearity) are computed independently with possibly different widths;
+    the per-cell numeric region is the union of the two taper regions, the
+    symbolic-supercell center region is the intersection.
+
+    Parameters
+    ----------
+    Ntot_cell, Ncpersc_cell : int
+        Total cell count, and cells per supercell (for center-region alignment).
+    Z_taper : bool
+        If True, ramp the cell impedance from Z0_ohm at the edges to Z0_TWPA_ohm
+        in the center over `Z_taper_width` of the line. If False, Z(n)=Z0_TWPA_ohm.
+    Z_taper_width : float
+        Total fraction of the line used for the impedance ramp.
+    Z_profile : str
+        'linear' or 'klopfenstein'.
+    klopfenstein_A : float or None
+        Klopfenstein design parameter; None ⇒ auto from 5% max ripple.
+    floquet_taper : bool
+        If True, ramp the nonlinearity from weak at edges to full strength in
+        the center over `floquet_taper_width` of the line. If False, w(n)=1.
+    floquet_taper_width : float
+        Total fraction of the line used for the nonlinearity ramp.
+    floquet_profile : str
+        'gaussian' or 'tukey'.
+    taper_cutoff : bool
+        False: fc(n)=fc_center, C(n) absorbs variation. True: C(n)=C_center,
+        fc(n) absorbs variation.
+    Z0_ohm, Z0_TWPA_ohm, fc_TLsec_GHz : float
+        Environment impedance, center TWPA impedance, center cutoff frequency.
+    LTLsec_H_center, L0_H_center : float
+        Center per-cell total series inductance and nonlinear-element inductance.
+    g_L, g_C : float
+        Filter prototype g-values.
+    nonlinearity : str
+        'JJ' or 'KI'.
+    jj_structure_type : str
+        'jj' or 'rf_squid'. Ignored for KI.
+    phi_dc, beta_L, LJ0_H, Lg_H, CJ_F, Ic_JJ_A, Istar_A, Id_A, L0_pH, n_jj_struct
+        Forwarded to `compute_floquet_cell_parameters`.
+    LinfLF1_H, L0LF2_H, Foster_form_L, Foster_form_C, zero_at_zero, select_one_form
+        Filter design parameters. Used both for `compute_floquet_cell_parameters`
+        and (when filters exist and the linear design varies) for per-cell filter
+        recomputation via `calculate_filter_components`.
+    f_zeros_GHz, f_poles_GHz, dispersion_type
+        Filter geometry. When `dispersion_type` is 'filter' or 'both' and
+        `f_zeros_GHz`/`f_poles_GHz` are non-empty, the function recomputes per-cell
+        filter components in the union taper region.
+    g_C_mod : np.ndarray or None
+        Per-cell shunt-cap modulation (length Ntot_cell). Used when present to
+        overlay periodic modulation on the per-cell shunt cap.
+    rf_squid_constant_plasma : bool
+        Forwarded to `compute_floquet_cell_parameters`.
+
+    Returns
+    -------
+    dict with keys:
+        'w_percell'              -- nonlinearity weight w(n) (shape Ntot_cell)
+        'Z_percell'              -- cell impedance Z(n) (shape Ntot_cell)
+        'fc_percell'             -- cell cutoff fc(n), GHz (shape Ntot_cell)
+        'LTLsec_H_percell'       -- per-cell total series inductance (None if not varying)
+        'CTLsec_F'               -- per-cell shunt cap (None if not varying)
+        'w_eff'                  -- effective NL weight for cell-component scaling
+                                    (= w for bare JJ, = (1+βcos)/(1+wβcos) for rf_squid,
+                                    = 1 for KI)
+        'center_start', 'center_end' -- symbolic-supercell center region (cells where
+                                        both w=1 AND Z=Z_TWPA, supercell-aligned)
+        'width'                  -- number of taper cells on each side (= center_start)
+        'n_periodic_sc'          -- number of symbolic supercells in the center
+        'linear_varies'          -- True if Z(n), fc(n), or C(n) varies along the line
+        'floquet_cell_params'    -- full output of compute_floquet_cell_parameters
+        'L0_H_percell'           -- per-cell NL inductance (from floquet_cell_params)
+        'CJ_F_percell'           -- per-cell JJ cap (from floquet_cell_params)
+        'floquet_filter_components' -- {cell_idx: filter_components_dict} for cells in the
+                                       union taper region when filters exist and the linear
+                                       design varies (empty dict otherwise)
+    """
+    Ntot = int(Ntot_cell)
+    Ncpersc = int(Ncpersc_cell) if Ncpersc_cell else 1
+
+    # --- Profile 1: nonlinearity weight w(n) ---
+    if floquet_taper:
+        weights, _, _ = compute_floquet_profile(
+            Ntot, floquet_profile, floquet_taper_width)
+        floquet_taper_cells = int(floquet_taper_width * Ntot / 2)
+    else:
+        weights = np.ones(Ntot)
+        floquet_taper_cells = 0
+
+    # --- Profile 2: cell impedance Z(n) ---
+    if Z_taper and Z0_TWPA_ohm != Z0_ohm:
+        Z_taper_cells = int(Z_taper_width * Ntot / 2)
+        if Z_profile == 'klopfenstein':
+            Z_percell = compute_klopfenstein_Z_profile(
+                Ntot, Z_taper_cells, Z0_ohm, Z0_TWPA_ohm,
+                A=klopfenstein_A, max_ripple=0.05)
+        else:
+            Z_percell = compute_linear_Z_profile(
+                Ntot, Z_taper_cells, Z0_ohm, Z0_TWPA_ohm)
+    else:
+        Z_percell = np.full(Ntot, float(Z0_TWPA_ohm))
+        Z_taper_cells = 0
+
+    # --- Union taper region, supercell-aligned for the symbolic center power ---
+    taper_cells_raw = max(floquet_taper_cells, Z_taper_cells)
+    width = int(round(taper_cells_raw / Ncpersc) * Ncpersc) if Ncpersc > 0 else taper_cells_raw
+    width = min(width, Ntot // 2)
+    center_start = width
+    center_end = Ntot - width
+    if Ncpersc > 0:
+        n_periodic_sc = int((center_end - center_start) / Ncpersc)
+    else:
+        n_periodic_sc = max(0, center_end - center_start)
+
+    # --- Effective NL weight for cell-component scaling ---
+    # For KI: L0 is decoupled from w (the impedance taper drives L0(n) directly),
+    # so w_eff = 1 — the nonlinearity ramp doesn't disturb the linear cell design.
+    # For bare JJ: w_eff = w (Lj scales with w, cell is "thinner" at edges).
+    # For rf_squid: w_eff = (1+β·cos)/(1+w·β·cos) > 1 at edges (cell is "thicker").
+    if nonlinearity == 'JJ' and jj_structure_type == 'rf_squid':
+        cos_phi = np.cos(phi_dc)
+        beta_val = beta_L if beta_L is not None else 0.0
+        w_eff = (1 + beta_val * cos_phi) / (1 + weights * beta_val * cos_phi)
+    elif nonlinearity == 'JJ':
+        w_eff = weights
+    else:  # KI
+        w_eff = np.ones(Ntot)
+
+    # --- fc(n) per taper_cutoff semantics ---
+    if taper_cutoff:
+        safe_Z = np.maximum(Z_percell, 1e-30)
+        safe_w_eff = np.maximum(w_eff, 1e-30)
+        # General formula: L_total(n) = g_L·Z(n)/(2π·fc(n)) = L_total_center · (Z(n)/Z_TWPA) / w_eff(n) · ?
+        # Equivalent: fc(n) = g_L·Z(n)/(2π · L_total_center · w_eff(n))
+        fc_percell = (g_L * safe_Z
+                      / (2 * np.pi * LTLsec_H_center * safe_w_eff)) * 1e-9
+    else:
+        fc_percell = np.full(Ntot, float(fc_TLsec_GHz))
+
+    # --- Does the linear design actually vary along the line? ---
+    # Z taper always makes it vary (Z, C, fc all depend on it).
+    # Floquet taper + taper_cutoff makes fc vary only for JJ (w_eff != 1).
+    # KI without Z taper has w_eff = 1 ⇒ uniform line even if floquet_taper is on.
+    linear_varies = bool(Z_taper and Z0_TWPA_ohm != Z0_ohm) \
+                    or bool(floquet_taper and taper_cutoff and nonlinearity == 'JJ')
+
+    # --- Per-cell L_total and C arrays (only when varying) ---
+    LTLsec_H_percell = None
+    CTLsec_F_percell = None
+    if linear_varies:
+        LTLsec_H_percell = g_L * Z_percell / (2 * np.pi * fc_percell * 1e9)
+        if g_C_mod is not None and hasattr(g_C_mod, '__len__') and len(g_C_mod) == Ntot:
+            g_C_eff = np.asarray(g_C_mod)
+        else:
+            g_C_eff = g_C
+        CTLsec_F_percell = g_C_eff / (Z_percell * 2 * np.pi * fc_percell * 1e9)
+
+    # --- Per-cell filter recomputation in the union taper region ---
+    floquet_filter_components = {}
+    if (linear_varies and dispersion_type in ['filter', 'both']
+            and f_zeros_GHz is not None and f_poles_GHz is not None
+            and (len(np.atleast_1d(f_zeros_GHz)) + len(np.atleast_1d(f_poles_GHz)) > 0)):
+        taper_indices = list(range(width)) + list(range(Ntot - width, Ntot))
+        is_rf_squid = (nonlinearity == 'JJ' and jj_structure_type == 'rf_squid')
+        cos_phi = np.cos(phi_dc)
+        L0_ratio_KI = ((L0_H_center / LTLsec_H_center)
+                       if (LTLsec_H_center > 0 and nonlinearity == 'KI') else 1.0)
+        f_zeros_arr = np.atleast_1d(f_zeros_GHz)
+        f_poles_arr = np.atleast_1d(f_poles_GHz)
+
+        for idx in taper_indices:
+            Z_cell = float(Z_percell[idx])
+            fc_cell = float(fc_percell[idx])
+            w_zeros_cell = f_zeros_arr / fc_cell
+            w_poles_cell = f_poles_arr / fc_cell
+
+            w_n = float(weights[idx])
+            if is_rf_squid:
+                L0_cell = Lg_H / (1 + beta_L * w_n * cos_phi)
+            elif nonlinearity == 'JJ':
+                L0_cell = LJ0_H * w_n
+            else:  # KI: L0(n) tracks L_total(n) proportionally
+                L0_cell = L0_ratio_KI * float(LTLsec_H_percell[idx])
+            L0_total_H_cell = n_jj_struct * L0_cell
+
+            (LinfLF1, C0LF1, LiLF1, CiLF1, LinfLF1_rem,
+             L0LF2_v, CinfLF2, LiLF2, CiLF2, L0LF2_rem,
+             LinfCF1, C0CF1, LiCF1, CiCF1,
+             L0CF2_v, CinfCF2, LiCF2, CiCF2,
+             _, _, _, _) = calculate_filter_components(
+                Foster_form_L, Foster_form_C, g_L, g_C,
+                w_zeros_cell, w_poles_cell, Z_cell, fc_cell,
+                zero_at_zero, L0_total_H_cell, select_one_form, verbose=False)
+
+            floquet_filter_components[idx] = {
+                'LinfLF1_H': LinfLF1, 'LinfLF1_rem_H': LinfLF1_rem,
+                'C0LF1_F': C0LF1, 'LiLF1_H': LiLF1, 'CiLF1_F': CiLF1,
+                'L0LF2_H': L0LF2_v, 'L0LF2_rem_H': L0LF2_rem,
+                'CinfLF2_F': CinfLF2, 'LiLF2_H': LiLF2, 'CiLF2_F': CiLF2,
+                'LinfCF1_H': LinfCF1, 'C0CF1_F': C0CF1, 'LiCF1_H': LiCF1, 'CiCF1_F': CiCF1,
+                'L0CF2_H': L0CF2_v, 'CinfCF2_F': CinfCF2, 'LiCF2_H': LiCF2, 'CiCF2_F': CiCF2,
+            }
+
+    # --- KI: L0(n) tracks L_total(n) only when the linear design varies ---
+    L0_H_KI_percell = None
+    if nonlinearity == 'KI' and linear_varies and LTLsec_H_percell is not None:
+        L0_ratio = (L0_H_center / LTLsec_H_center) if LTLsec_H_center > 0 else 1.0
+        L0_H_KI_percell = L0_ratio * LTLsec_H_percell
+
+    # --- Per-cell nonlinearity split ---
+    floquet_cell_params = compute_floquet_cell_parameters(
+        weights, nonlinearity, jj_structure_type,
+        LJ0_H, Lg_H, beta_L, phi_dc, CJ_F,
+        Ic_JJ_A, Istar_A, Id_A,
+        L0_pH, LTLsec_H_center, n_jj_struct,
+        LinfLF1_H=LinfLF1_H, L0LF2_H=L0LF2_H,
+        Foster_form_L=Foster_form_L,
+        rf_squid_constant_plasma=rf_squid_constant_plasma,
+        L0_H_KI_percell=L0_H_KI_percell,
+    )
+    L0_H_percell = floquet_cell_params['L0_H']
+    CJ_F_percell = floquet_cell_params.get('CJ_F')
+
+    # Refresh TL section remainder against the per-cell L_total when it varies.
+    if linear_varies and LTLsec_H_percell is not None:
+        floquet_cell_params['LTLsec_rem_H'] = np.maximum(
+            0, LTLsec_H_percell - n_jj_struct * L0_H_percell)
+
+    return {
+        'w_percell': weights,
+        'Z_percell': Z_percell,
+        'fc_percell': fc_percell,
+        'LTLsec_H_percell': LTLsec_H_percell,
+        'CTLsec_F': CTLsec_F_percell,
+        'w_eff': w_eff,
+        'center_start': center_start,
+        'center_end': center_end,
+        'width': width,
+        'n_periodic_sc': n_periodic_sc,
+        'linear_varies': linear_varies,
+        'floquet_cell_params': floquet_cell_params,
+        'L0_H_percell': L0_H_percell,
+        'CJ_F_percell': CJ_F_percell,
+        'floquet_filter_components': floquet_filter_components,
+    }
+
+
+################################################################################################
+################################################################################################
 
 def filter_design_L(g_L, w_poles, w_zeros, Z0_TWPA_ohm, fc_filter_GHz, zero_at_zero, Foster_form_L):
     
@@ -1609,7 +2310,12 @@ def pl_derived_quantities(f_stopbands_GHz, deltaf_min_GHz, deltaf_max_GHz, f0_GH
     n_stopbands = len(f_stopbands_GHz) # number of stopbands
     print(f"Number of designed stopbands: {n_stopbands}")
 
-    f1_GHz = math.gcd(*f_stopbands_GHz)
+    # Generalized gcd over rationals: scale to integer milli-GHz (1 MHz resolution),
+    # take integer gcd, then scale back. Handles fractional GHz stopbands such as 8.5
+    # while staying exact for the integer-GHz case used elsewhere.
+    GHZ_TO_INT = 1000  # 1 MHz resolution
+    scaled = [int(round(f * GHZ_TO_INT)) for f in f_stopbands_GHz]
+    f1_GHz = math.gcd(*scaled) / GHZ_TO_INT
     print(f"f1_GHz: {f1_GHz}")
 
     ind_stopband = [int(np.round(f/f1_GHz)) for f in f_stopbands_GHz] # stopband indices

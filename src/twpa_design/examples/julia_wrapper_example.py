@@ -49,6 +49,9 @@ mutual_inductance_H: Mutual inductance in Henries. default: None
 Npumpharmonics: Number of pump harmonics. default: 20
 Nmodulationharmonics: Number of modulation harmonics. default: 10
 
+# Solver mode
+solver_mode: 'nonlinear' for full harmonic balance with pump, 'linear' for S-parameter analysis only. default: 'nonlinear'
+
 # Additional solver settings
 enable_three_wave_mixing: Enable 3WM analysis. default: False
 enable_four_wave_mixing: Enable 4WM analysis. default: True
@@ -115,10 +118,68 @@ SIMULATION_CONFIGS = {
             ftol=1e-5,  # Increased tolerance for convergence
             store_signal_nodeflux=False
         )
-    }
+    },
+    'floquet_jtwpa_lin': {
+        'netlist_name': 'floquet_jtwpa_2497cells_01',
+        'config': TWPASimulationConfig(
+            freq_start_GHz=4.0,
+            freq_stop_GHz=12.0,
+            freq_step_GHz=0.01,
+            solver_mode="linear" # or "nonlinear"            
+        )
+    },
+    'floquet_jtwpa': {
+        'netlist_name': 'floquet_jtwpa_2497cells_01',
+        'config': TWPASimulationConfig(
+            freq_start_GHz=4.0,
+            freq_stop_GHz=12.0,
+            freq_step_GHz=0.01,
+            pump_freq_GHz=8.65,
+            pump_current_A=2.9e-6,
+            Npumpharmonics=8,
+            Nmodulationharmonics=4
+        )
+    },
+    'rfsq_twpa': {
+        'netlist_name': 'rfsq_twpa_2497cells_01',
+        'config': TWPASimulationConfig(
+            freq_start_GHz=4.0,
+            freq_stop_GHz=12.0,
+            freq_step_GHz=0.011,
+            pump_freq_GHz=8.65,
+            pump_current_A=12.5e-6,
+            Npumpharmonics=8,
+            Nmodulationharmonics=4
+        )
+    },
+    'floquet_rfsq_twpa': {
+        'netlist_name': 'floquet_rfsq_twpa_2497cells_01',
+        'config': TWPASimulationConfig(
+            freq_start_GHz=4.0,
+            freq_stop_GHz=12.0,
+            freq_step_GHz=0.033,
+            pump_freq_GHz=8.65,
+            pump_current_A=12.2e-6,
+            Npumpharmonics=8,
+            Nmodulationharmonics=4
+        )
+    },
+    'floquet_ktwpa': {
+        'netlist_name': 'floquet_ktwpa_9996cells_01',
+        'config': TWPASimulationConfig(
+            freq_start_GHz=4.0,
+            freq_stop_GHz=14.0,
+            freq_step_GHz=0.033,
+            pump_freq_GHz=9.4,
+            pump_current_A=25e-6,
+            Npumpharmonics=8,
+            Nmodulationharmonics=10,
+        )
+    },
 }
 
-simulation_type = "ktwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'b_jtwpa_v2', 'ktwpa'
+simulation_type = "floquet_ktwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa', 
+                                   #'floquet_jtwpa_lin', 'floquet_jtwpa', 'rfsq_twpa', 'floquet_rfsq_twpa', 'floquet_ktwpa'
 
 # Get the config for the chosen simulation
 if simulation_type in SIMULATION_CONFIGS:

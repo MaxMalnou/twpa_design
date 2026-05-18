@@ -112,6 +112,14 @@ class JCNetlistBuilder:
         
         # Workspace data storage (for access by methods)
         self.workspace_data: Dict[str, Any] = {}
+
+        # When True, all component values are written as inline numeric instead of symbolic
+        self.force_numeric: bool = False
+
+        # Set by _taper_filter while building a Floquet-taper filter cell, consumed by
+        # add_inductance to build a per-cell numeric Taylor poly for KI (and per-cell
+        # numeric Lj for JJ) instead of using the shared symbolic L0/c1/c2.
+        self._taper_cell_idx: Optional[int] = None
     
     def get_new_node(self) -> str:
         """Get a new sequential node number"""
@@ -164,6 +172,7 @@ class JCNetlistBuilder:
         self.Lj_value = None
         self.Cj_value = None
         self.workspace_data = {}
+        self.force_numeric = False
     
     def get_netlist_tuples(self) -> List[Tuple[str, str, str, str]]:
         """Convert components to tuple format for output"""
@@ -207,9 +216,22 @@ class JCNetlistBuilder:
         
         return float(value_str)
     
-    def create_symbolic_value(self, numeric_value, component_type, component_name, 
+    def create_symbolic_value(self, numeric_value, component_type, component_name,
                             Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None):
-        """Create symbolic parameter and store value"""
+        """Create symbolic parameter and store value.
+        When self.force_numeric is True, returns inline numeric string instead."""
+        if self.force_numeric:
+            # Dielectric loss applies to capacitors (junction caps go through a
+            # direct circuit_parameters['Cj'] write, never this path). The
+            # symbolic-parameters writer applies the same wrapper to C* params
+            # at save time; this branch handles inline numeric caps in the
+            # taper region uniformly.
+            enable_loss = self.workspace_data.get('enable_dielectric_loss', False)
+            loss_tan = self.workspace_data.get('loss_tangent', 0.0)
+            if component_type == 'C' and enable_loss and loss_tan > 0:
+                return f"{numeric_value:.6e}/(1+{loss_tan:.6e}im)"
+            return f"{numeric_value:.6e}"
+
         # Ensure component_name is a string
         component_name = str(component_name)
 
@@ -409,7 +431,7 @@ class JCNetlistBuilder:
         Only includes coefficients that are actually defined.
         """
         poly_parts = [base_param]  # Start with base parameter
-        
+
         # Check which coefficients exist and add them
         for coeff in ['c1', 'c2', 'c3', 'c4']:
             taylor_val = self.workspace_data.get(f'{coeff}_taylor')
@@ -421,184 +443,209 @@ class JCNetlistBuilder:
             else:
                 # Stop at first missing coefficient (can't skip coefficients in polynomial)
                 break
-        
+
         # Join with commas, then prepend 'poly '
         return 'poly ' + ', '.join(poly_parts)
+
+    def _build_per_cell_taylor_str(self, cell_idx):
+        """Build a Taylor poly string with per-cell numeric values for cell cell_idx.
+
+        Mirrors the format used by `add_inductance_floquet`: pulls `L0_H` and
+        `cN_taylor` arrays from `workspace_data['floquet_cell_params']` and
+        formats them as `poly L0_val, c1_val, c2_val, ...`. Used for KI in
+        Floquet-taper filter cells (where the call chain reaches `add_inductance`
+        instead of `add_inductance_floquet`, but per-cell numeric values are still
+        required so each cell's Z(n)-dependent L0 and Taylor coefficients land in
+        the netlist correctly).
+        """
+        floquet_params = self.workspace_data.get('floquet_cell_params', {})
+        L0_arr = floquet_params.get('L0_H')
+        if L0_arr is None:
+            # Fall back to the workspace's center scalar if no per-cell array is available.
+            L0_cell = float(self.workspace_data.get('L0_H', 0.0))
+        else:
+            L0_cell = float(L0_arr[cell_idx])
+
+        parts = [f"{L0_cell:.6e}"]
+        for coeff in ['c1_taylor', 'c2_taylor', 'c3_taylor', 'c4_taylor']:
+            c_arr = floquet_params.get(coeff)
+            if c_arr is None:
+                # Try the workspace scalar fallback before stopping.
+                scalar = self.workspace_data.get(coeff)
+                if scalar is None:
+                    break
+                parts.append(f"{float(scalar):.6e}")
+            elif hasattr(c_arr, '__len__'):
+                parts.append(f"{float(c_arr[cell_idx]):.6e}")
+            else:
+                parts.append(f"{float(c_arr):.6e}")
+        return 'poly ' + ', '.join(parts)
     
-    def add_bare_jj(self, component_name, node1, node2, n_jj_struct, use_taylor=False):
+    def add_bare_jj(self, component_name, node1, node2, n_jj_struct, use_taylor=False,
+                    Lj_numeric=None, Cj_numeric=None):
         """
         Add bare Josephson junction(s) or Taylor equivalent (no geometric inductance).
         Each structure includes its CJ capacitor.
-        
+
         Parameters:
         - component_name: Base name for components
         - node1, node2: Circuit nodes
         - n_jj_struct: Number of JJs in series
         - use_taylor: Use Taylor expansion if True
+        - Lj_numeric: If provided, use this numeric value instead of symbolic 'Lj'
+        - Cj_numeric: If provided, use this numeric value instead of symbolic 'Cj'
         """
+        lj_val = f"{Lj_numeric:.6e}" if Lj_numeric is not None else 'Lj'
+        cj_val = f"{Cj_numeric:.6e}" if Cj_numeric is not None else 'Cj'
+        has_cj = (Cj_numeric is not None and Cj_numeric > 0) if Cj_numeric is not None else (self.Cj_value is not None and self.Cj_value > 0)
+
         if use_taylor:
-            # Use Taylor expansion for bare JJ(s)
             L0_H = self.workspace_data.get('L0_H')
             if L0_H is None:
                 raise ValueError("L0_H must be defined for Taylor expansion")
-            
-            # Use the same shared L0 parameter
+
             if 'L0' not in self.circuit_parameters:
                 self.circuit_parameters['L0'] = L0_H
-            
-            # Create the NL element with Taylor expansion
+
             taylor_str = self.get_taylor_poly_string()
-            
+
             if n_jj_struct == 1:
-                # Single NL element with CJ
                 nl_name = self.make_unique_name(f"NL{component_name}")
                 self.components.append(JCComponent(nl_name, str(node1), str(node2), taylor_str))
-                
-                # Add CJ in parallel with the NL element
-                if self.Cj_value is not None and self.Cj_value > 0:
+
+                if has_cj:
                     cj_name = self.make_unique_name(f"Cj{component_name}")
-                    self.components.append(JCComponent(cj_name, str(node1), str(node2), 'Cj'))
+                    self.components.append(JCComponent(cj_name, str(node1), str(node2), cj_val))
             else:
-                # Multiple NL elements in series, each with CJ
                 current_node = node1
                 for i in range(n_jj_struct):
                     next_node = self.get_new_node() if i < n_jj_struct - 1 else node2
-                    
-                    # Add NL element
+
                     nl_name = self.make_unique_name(f"NL{component_name}_{i+1}")
                     self.components.append(JCComponent(nl_name, str(current_node), str(next_node), taylor_str))
-                    
-                    # Add CJ in parallel with this NL element
-                    if self.Cj_value is not None and self.Cj_value > 0:
+
+                    if has_cj:
                         cj_name = self.make_unique_name(f"Cj{component_name}_{i+1}")
-                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), 'Cj'))
-                    
+                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), cj_val))
+
                     current_node = next_node
         else:
             # Traditional bare JJ(s)
             if n_jj_struct == 1:
-                # Single JJ with its capacitor
                 lj_name = self.make_unique_name(f"Lj{component_name}")
-                self.components.append(JCComponent(lj_name, str(node1), str(node2), 'Lj'))
+                self.components.append(JCComponent(lj_name, str(node1), str(node2), lj_val))
                 
-                # Add shunt capacitance if it exists
-                if self.Cj_value is not None and self.Cj_value > 0:
+                if has_cj:
                     cj_name = self.make_unique_name(f"Cj{component_name}")
-                    self.components.append(JCComponent(cj_name, str(node1), str(node2), 'Cj'))
+                    self.components.append(JCComponent(cj_name, str(node1), str(node2), cj_val))
             else:
-                # Multiple JJs in series, each with its own capacitor
                 current_node = node1
                 for i in range(n_jj_struct):
                     next_node = self.get_new_node() if i < n_jj_struct - 1 else node2
-                    
-                    # Add the JJ
+
                     lj_name = self.make_unique_name(f"Lj{component_name}_{i+1}")
-                    self.components.append(JCComponent(lj_name, str(current_node), str(next_node), 'Lj'))
-                    
-                    # Add shunt capacitance for this JJ
-                    if self.Cj_value is not None and self.Cj_value > 0:
+                    self.components.append(JCComponent(lj_name, str(current_node), str(next_node), lj_val))
+
+                    if has_cj:
                         cj_name = self.make_unique_name(f"Cj{component_name}_{i+1}")
-                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), 'Cj'))
-                    
+                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), cj_val))
+
                     current_node = next_node
 
     
-    def add_rf_squid(self, component_name, node1, node2, n_jj_struct, Lg_H, use_taylor=False):
+    def add_rf_squid(self, component_name, node1, node2, n_jj_struct, Lg_H, use_taylor=False,
+                    Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
         """
         Add rf-SQUID(s) (JJ in parallel with geometric inductance) or Taylor equivalent.
         Each rf-SQUID unit includes its own CJ capacitor.
-        
+
         Parameters:
         - component_name: Base name for the components
         - node1, node2: Circuit nodes
         - n_jj_struct: Number of rf-SQUIDs in series
         - Lg_H: Geometric inductance in Henries (None or np.inf means no Lg)
         - use_taylor: If True, use Taylor expansion instead of JJ
-        
-        Returns: None (components are added to self.components)
+        - Lj_numeric: If provided, use this numeric value instead of symbolic 'Lj'
+        - Cj_numeric: If provided, use this numeric value instead of symbolic 'Cj'
+        - Cjx_numeric: If provided and > 0, add an extra shunt capacitor in parallel
+                       with the rf-SQUID (used for rf_squid_constant_plasma option).
         """
-        # Check if we actually have a geometric inductance
         has_Lg = Lg_H is not None and not np.isinf(Lg_H) and Lg_H > 0
-        
+        lj_val = f"{Lj_numeric:.6e}" if Lj_numeric is not None else 'Lj'
+        cj_val = f"{Cj_numeric:.6e}" if Cj_numeric is not None else 'Cj'
+        has_cj = (Cj_numeric is not None and Cj_numeric > 0) if Cj_numeric is not None else (self.Cj_value is not None and self.Cj_value > 0)
+        has_cjx = Cjx_numeric is not None and Cjx_numeric > 0 and not np.isinf(Cjx_numeric)
+
         if use_taylor:
-            # Use Taylor expansion for rf-SQUID(s)
             L0_H = self.workspace_data.get('L0_H')
             if L0_H is None:
                 raise ValueError("L0_H must be defined to use Taylor expansion for rf-SQUID")
-            
-            # Set up Taylor coefficients
+
             if 'L0' not in self.circuit_parameters:
                 self.circuit_parameters['L0'] = L0_H
-            
-            # Create the NL element with Taylor expansion
+
             taylor_str = self.get_taylor_poly_string()
-            
+
             if n_jj_struct == 1:
-                # Single NL element (represents Lj||Lg) with CJ
                 nl_name = self.make_unique_name(f"NL{component_name}")
                 self.components.append(JCComponent(nl_name, str(node1), str(node2), taylor_str))
-                
-                # Add CJ in parallel with the NL element
-                if self.Cj_value is not None and self.Cj_value > 0:
+
+                if has_cj:
                     cj_name = self.make_unique_name(f"Cj{component_name}")
-                    self.components.append(JCComponent(cj_name, str(node1), str(node2), 'Cj'))
+                    self.components.append(JCComponent(cj_name, str(node1), str(node2), cj_val))
             else:
-                # Multiple NL elements in series, each with CJ
                 current_node = node1
                 for i in range(n_jj_struct):
                     next_node = self.get_new_node() if i < n_jj_struct - 1 else node2
-                    
-                    # Add NL element (represents one rf-SQUID)
+
                     nl_name = self.make_unique_name(f"NL{component_name}_{i+1}")
                     self.components.append(JCComponent(nl_name, str(current_node), str(next_node), taylor_str))
-                    
-                    # Add CJ in parallel with this NL element
-                    if self.Cj_value is not None and self.Cj_value > 0:
+
+                    if has_cj:
                         cj_name = self.make_unique_name(f"Cj{component_name}_{i+1}")
-                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), 'Cj'))
-                    
+                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), cj_val))
+
                     current_node = next_node
         else:
-            # Traditional rf-SQUID: JJ(s) in parallel with Lg
             if n_jj_struct == 1:
-                # Single rf-SQUID unit
-                # Add JJ
                 lj_name = self.make_unique_name(f"Lj{component_name}")
-                self.components.append(JCComponent(lj_name, str(node1), str(node2), 'Lj'))
-                
-                # Add geometric inductance in parallel if it exists
+                self.components.append(JCComponent(lj_name, str(node1), str(node2), lj_val))
+
                 if has_Lg:
                     lg_name = self.make_unique_name(f"Lg{component_name}")
                     lg_symbol = self.create_symbolic_value(Lg_H, 'L', f"Lg{component_name}")
                     self.components.append(JCComponent(lg_name, str(node1), str(node2), lg_symbol))
-                
-                # Add shunt capacitance for this rf-SQUID
-                if self.Cj_value is not None and self.Cj_value > 0:
+
+                if has_cj:
                     cj_name = self.make_unique_name(f"Cj{component_name}")
-                    self.components.append(JCComponent(cj_name, str(node1), str(node2), 'Cj'))
+                    self.components.append(JCComponent(cj_name, str(node1), str(node2), cj_val))
+
+                if has_cjx:
+                    cjx_name = self.make_unique_name(f"Cjx{component_name}")
+                    self.components.append(JCComponent(cjx_name, str(node1), str(node2), f"{Cjx_numeric:.6e}"))
             else:
-                # Multiple rf-SQUIDs in series
                 current_node = node1
                 for i in range(n_jj_struct):
                     next_node = self.get_new_node() if i < n_jj_struct - 1 else node2
-                    
-                    # Add JJ for this rf-SQUID
+
                     lj_name = self.make_unique_name(f"Lj{component_name}_{i+1}")
-                    self.components.append(JCComponent(lj_name, str(current_node), str(next_node), 'Lj'))
-                    
-                    # Add geometric inductance in parallel if it exists
+                    self.components.append(JCComponent(lj_name, str(current_node), str(next_node), lj_val))
+
                     if has_Lg:
                         lg_name = self.make_unique_name(f"Lg{component_name}_{i+1}")
                         lg_symbol = self.create_symbolic_value(Lg_H, 'L', f"Lg{component_name}_{i+1}")
                         self.components.append(JCComponent(lg_name, str(current_node), str(next_node), lg_symbol))
-                    
-                    # Add shunt capacitance for this rf-SQUID
-                    if self.Cj_value is not None and self.Cj_value > 0:
+
+                    if has_cj:
                         cj_name = self.make_unique_name(f"Cj{component_name}_{i+1}")
-                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), 'Cj'))
-                    
+                        self.components.append(JCComponent(cj_name, str(current_node), str(next_node), cj_val))
+
+                    if has_cjx:
+                        cjx_name = self.make_unique_name(f"Cjx{component_name}_{i+1}")
+                        self.components.append(JCComponent(cjx_name, str(current_node), str(next_node), f"{Cjx_numeric:.6e}"))
+
                     current_node = next_node
-    
+
     def add_snail(self, component_name, node1, node2, n_large, alpha, use_taylor=False):
         """
         Add a SNAIL element or its Taylor equivalent.
@@ -661,31 +708,36 @@ class JCNetlistBuilder:
             # Traditional DC-SQUID implementation
             raise NotImplementedError("Traditional DC-SQUID not yet implemented")
         
-    def add_jj_structure(self, component_name, node1, node2, structure_params):
+    def add_jj_structure(self, component_name, node1, node2, structure_params,
+                        Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
         """
         Dispatcher method for different JJ structures.
-        
+
         Parameters:
         - component_name: Base name for components
         - node1, node2: Circuit nodes
         - structure_params: Dict with structure-specific parameters including 'type'
+        - Lj_numeric: If provided, use this numeric Lj value instead of symbolic 'Lj'
+        - Cj_numeric: If provided, use this numeric Cj value instead of symbolic 'Cj'
+        - Cjx_numeric: If provided and > 0, add an extra shunt cap (rf_squid only).
         """
         structure_type = structure_params.get('type', 'rf_squid')
         use_taylor = self.workspace_data.get('use_taylor_insteadof_JJ', False)
-        
+
         if structure_type == 'jj':
-            # Bare JJ - no geometric inductance
             self.add_bare_jj(
                 component_name, node1, node2,
                 structure_params.get('n_jj_struct', 1),
-                use_taylor
+                use_taylor,
+                Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric
             )
         elif structure_type == 'rf_squid':
             self.add_rf_squid(
                 component_name, node1, node2,
                 structure_params.get('n_jj_struct', 1),
                 structure_params.get('Lg_H'),
-                use_taylor
+                use_taylor,
+                Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric
             )
         elif structure_type == 'snail':
             self.add_snail(
@@ -705,9 +757,16 @@ class JCNetlistBuilder:
         else:
             raise ValueError(f"Unknown JJ structure type: {structure_type}")
     
-    def add_inductance(self, component_name, node1, node2, nonlinearity, L_H, L_rem_H, 
-                      Lg_H, epsilon_perA, xi_perA2, n_jj_struct):
-        """Add inductance to JC netlist (handles JJ, KI, and linear inductances)"""
+    def add_inductance(self, component_name, node1, node2, nonlinearity, L_H, L_rem_H,
+                      Lg_H, epsilon_perA, xi_perA2, n_jj_struct,
+                      Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
+        """Add inductance to JC netlist (handles JJ, KI, and linear inductances).
+
+        When Lj_numeric/Cj_numeric are provided, numeric values are used instead of
+        symbolic 'Lj'/'Cj' references. Used for Floquet taper cells.
+        Cjx_numeric: optional extra shunt cap in parallel with the rf_squid
+        (used for rf_squid_constant_plasma option).
+        """
         # Determine if we need an intermediate node for remainder
         need_remainder = L_rem_H != 0
         final_node = node2
@@ -738,43 +797,51 @@ class JCNetlistBuilder:
                 structure_params['asymmetry'] = self.workspace_data.get('dc_squid_asymmetry', 0.0)
             
             # Use the dispatcher
-            self.add_jj_structure(component_name, node1, main_output_node, structure_params)
+            self.add_jj_structure(component_name, node1, main_output_node, structure_params,
+                                 Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
             
             # CJ capacitors are now added within add_bare_jj and add_rf_squid
                     
         elif nonlinearity == 'KI':
             # Create NL (nonlinear) inductor with Taylor coefficients
             nl_name = self.make_unique_name(f"NL{component_name}")
-            
-            # Use shared parameters for all NL inductors
-            if 'L0' not in self.circuit_parameters:
-                self.circuit_parameters['L0'] = L_H
-            
-            # Add all available Taylor coefficients
-            if 'c1' not in self.circuit_parameters:
-                if 'c1_taylor' in self.workspace_data:
-                    self.circuit_parameters['c1'] = self.workspace_data['c1_taylor']
-                else:
-                    self.circuit_parameters['c1'] = epsilon_perA
-            
-            if 'c2' not in self.circuit_parameters:
-                if 'c2_taylor' in self.workspace_data:
-                    self.circuit_parameters['c2'] = self.workspace_data['c2_taylor']
-                else:
-                    self.circuit_parameters['c2'] = xi_perA2
-            
-            # Check for c3 and c4
-            if 'c3' not in self.circuit_parameters and 'c3_taylor' in self.workspace_data:
-                self.circuit_parameters['c3'] = self.workspace_data['c3_taylor']
-            
-            if 'c4' not in self.circuit_parameters and 'c4_taylor' in self.workspace_data:
-                self.circuit_parameters['c4'] = self.workspace_data['c4_taylor']
-            
-            # Use the same method as JJ structures to build the poly string
-            taylor_str = self.get_taylor_poly_string()
-            
-            # Add the NL component
-            self.components.append(JCComponent(nl_name, str(node1), str(main_output_node), taylor_str))
+
+            # In a Floquet-taper filter cell, the calling chain
+            # (_taper_filter → add_filtered_stages → add_foster*_L_stage) sets
+            # self._taper_cell_idx so we can emit a per-cell *numeric* Taylor poly
+            # (L0 and Taylor coefficients vary with the cell's Z(n), since KI
+            # decouples L0 from the nonlinearity strength). Using the shared
+            # symbolic L0/c1/c2 here would freeze every NL element in the line to
+            # whichever cell was processed first — that was the source of the
+            # filter-resonance smearing observed when Z0_TWPA_ohm != Z0_ohm.
+            if self._taper_cell_idx is not None:
+                taylor_str = self._build_per_cell_taylor_str(self._taper_cell_idx)
+                self.components.append(JCComponent(nl_name, str(node1), str(main_output_node), taylor_str))
+            else:
+                # Symbolic path (non-taper / non-Floquet cells)
+                if 'L0' not in self.circuit_parameters:
+                    self.circuit_parameters['L0'] = L_H
+
+                if 'c1' not in self.circuit_parameters:
+                    if 'c1_taylor' in self.workspace_data:
+                        self.circuit_parameters['c1'] = self.workspace_data['c1_taylor']
+                    else:
+                        self.circuit_parameters['c1'] = epsilon_perA
+
+                if 'c2' not in self.circuit_parameters:
+                    if 'c2_taylor' in self.workspace_data:
+                        self.circuit_parameters['c2'] = self.workspace_data['c2_taylor']
+                    else:
+                        self.circuit_parameters['c2'] = xi_perA2
+
+                if 'c3' not in self.circuit_parameters and 'c3_taylor' in self.workspace_data:
+                    self.circuit_parameters['c3'] = self.workspace_data['c3_taylor']
+
+                if 'c4' not in self.circuit_parameters and 'c4_taylor' in self.workspace_data:
+                    self.circuit_parameters['c4'] = self.workspace_data['c4_taylor']
+
+                taylor_str = self.get_taylor_poly_string()
+                self.components.append(JCComponent(nl_name, str(node1), str(main_output_node), taylor_str))
             
         elif nonlinearity == 'lin':
             l_name = self.make_unique_name(f"L{component_name}")
@@ -788,7 +855,107 @@ class JCNetlistBuilder:
             self.components.append(JCComponent(rem_name, str(intermediate_node), str(final_node), rem_symbol))
     
     
-    def add_capacitor(self, component_name, node1, node2, cap_value, Ncpersc_cell=None, 
+    def add_inductance_floquet(self, component_name, node1, node2, cell_idx,
+                              nonlinearity, n_jj_struct):
+        """Add inductance for a Floquet-tapered cell with per-cell numeric values.
+
+        Uses per-cell L0_H, Taylor coefficients, and remainder from
+        the reconstructed Floquet arrays in workspace_data.
+
+        For jj_structure_type='rf_squid', also reads per-cell Lj_H (the JJ
+        kinetic inductance, distinct from the effective parallel L0) and the
+        optional Cj_extra_F array (used when rf_squid_constant_plasma=True;
+        added as an extra Cjx{component_name} shunt cap to keep the local
+        plasma frequency constant along the taper).
+        """
+        floquet_params = self.workspace_data.get('floquet_cell_params', {})
+        L0_arr = floquet_params.get('L0_H')
+        if L0_arr is None:
+            raise ValueError("Floquet cell parameters not found in workspace_data")
+
+        L0_cell = float(L0_arr[cell_idx])
+        rem_arr = floquet_params.get('LTLsec_rem_H')
+        rem_cell = float(rem_arr[cell_idx]) if rem_arr is not None else 0.0
+
+        need_remainder = rem_cell > 1e-20
+        final_node = node2
+        if need_remainder:
+            intermediate_node = self.get_new_node()
+            main_output_node = intermediate_node
+        else:
+            main_output_node = node2
+
+        # Build per-cell numeric poly string
+        c1 = floquet_params.get('c1_taylor')
+        c2 = floquet_params.get('c2_taylor')
+        c3 = floquet_params.get('c3_taylor')
+        c4 = floquet_params.get('c4_taylor')
+
+        parts = [f"{L0_cell:.6e}"]
+        for c_arr in [c1, c2, c3, c4]:
+            if c_arr is not None and hasattr(c_arr, '__len__'):
+                parts.append(f"{float(c_arr[cell_idx]):.6e}")
+            elif c_arr is not None:
+                parts.append(f"{float(c_arr):.6e}")
+            else:
+                break
+        taylor_str = "poly " + ", ".join(parts)
+
+        if nonlinearity == 'JJ':
+            jj_structure_type = self.workspace_data.get('jj_structure_type', 'jj')
+            use_taylor = self.workspace_data.get('use_taylor_insteadof_JJ', False)
+
+            if use_taylor:
+                # Taylor expansion: NL poly string (works for both bare JJ and rf_squid)
+                nl_name = self.make_unique_name(f"NL{component_name}")
+                self.components.append(JCComponent(nl_name, str(node1), str(main_output_node), taylor_str))
+            else:
+                # Circuit-level: Lj (numeric) + Lg if rf_squid.
+                # For bare JJ: Lj = L0_H = LJ0 * w(n).
+                # For rf_squid: Lj = Lj_dyn = LJ0 / w(n) (the JJ kinetic inductance,
+                # NOT the effective parallel-combined L0). Lg is added in parallel below
+                # so the parallel combination gives the correct effective inductance.
+                Lj_arr = floquet_params.get('Lj_H')
+                lj_cell = float(Lj_arr[cell_idx]) if Lj_arr is not None else L0_cell
+                lj_name = self.make_unique_name(f"Lj{component_name}")
+                self.components.append(JCComponent(lj_name, str(node1), str(main_output_node), f"{lj_cell:.6e}"))
+                if jj_structure_type == 'rf_squid':
+                    Lg_H = self.workspace_data.get('Lg_H_value')
+                    if Lg_H is not None and not np.isinf(Lg_H) and Lg_H > 0:
+                        lg_name = self.make_unique_name(f"Lg{component_name}")
+                        lg_symbol = self.create_symbolic_value(Lg_H, 'L', f"Lg{component_name}")
+                        self.components.append(JCComponent(lg_name, str(node1), str(main_output_node), lg_symbol))
+
+            # Per-cell CJ (numeric)
+            CJ_arr = floquet_params.get('CJ_F')
+            if CJ_arr is not None:
+                cj_val = float(CJ_arr[cell_idx])
+                if cj_val > 0 and not np.isinf(cj_val):
+                    cj_name = self.make_unique_name(f"Cj{component_name}")
+                    self.components.append(JCComponent(cj_name, str(node1), str(main_output_node), f"{cj_val:.6e}"))
+
+            # Optional extra shunt cap in parallel with the rf_squid (Cj + Lj || Lg),
+            # used to keep the rf_squid plasma frequency constant along the line.
+            CJx_arr = floquet_params.get('Cj_extra_F')
+            if CJx_arr is not None:
+                cjx_val = float(CJx_arr[cell_idx])
+                if cjx_val > 0 and not np.isinf(cjx_val):
+                    cjx_name = self.make_unique_name(f"Cjx{component_name}")
+                    self.components.append(JCComponent(cjx_name, str(node1), str(main_output_node), f"{cjx_val:.6e}"))
+
+        elif nonlinearity == 'KI':
+            nl_name = self.make_unique_name(f"NL{component_name}")
+            self.components.append(JCComponent(nl_name, str(node1), str(main_output_node), taylor_str))
+
+        elif nonlinearity == 'lin':
+            l_name = self.make_unique_name(f"L{component_name}")
+            self.components.append(JCComponent(l_name, str(node1), str(main_output_node), f"{L0_cell:.6e}"))
+
+        if need_remainder:
+            rem_name = self.make_unique_name(f"L{component_name}_rem")
+            self.components.append(JCComponent(rem_name, str(intermediate_node), str(final_node), f"{rem_cell:.6e}"))
+
+    def add_capacitor(self, component_name, node1, node2, cap_value, Ncpersc_cell=None,
                      is_windowed=False, ind_g_C_with_filters=None, dispersion_type=None):
         """Add capacitor to JC netlist"""
         c_name = self.make_unique_name(f"C{component_name}")        
@@ -828,27 +995,28 @@ class JCNetlistBuilder:
     def add_foster1_L_stage(self, start_node, k, k_idx, nonlinearity, n_jj_struct, n_poles,
                             LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
                             Lg_H, epsilon_perA, xi_perA2,
-                            Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None):
+                            Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None,
+                            Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
         """Add Foster 1 L stage components inline and return output node"""
-        
+
         current_node = start_node
         p = 1
-        
+
         # Handle LinfLF1
         if check_flat(LinfLF1_H, k_idx) != 0:
             if check_flat(C0LF1_F, k_idx) != np.inf or (n_poles > 0 and CiLF1_F[k_idx, n_poles-1] != np.inf):
-                # Create intermediate node LF1_1_k
                 next_node = self.get_new_node()
                 self.add_inductance(f'infLF1_{k}', current_node, next_node, nonlinearity,
                                   check_flat(LinfLF1_H, k_idx), check_flat(LinfLF1_rem_H, k_idx),
-                                  Lg_H, epsilon_perA, xi_perA2, n_jj_struct)
+                                  Lg_H, epsilon_perA, xi_perA2, n_jj_struct,
+                                  Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
                 current_node = next_node
             else:
-                # Connects directly to output
                 output_node = self.get_new_node()
                 self.add_inductance(f'infLF1_{k}', current_node, output_node, nonlinearity,
                                   check_flat(LinfLF1_H, k_idx), check_flat(LinfLF1_rem_H, k_idx),
-                                  Lg_H, epsilon_perA, xi_perA2, n_jj_struct)
+                                  Lg_H, epsilon_perA, xi_perA2, n_jj_struct,
+                                  Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
                 return output_node
             p += 1
         
@@ -904,16 +1072,18 @@ class JCNetlistBuilder:
     def add_foster2_L_stage(self, start_node, k, k_idx, nonlinearity, n_jj_struct, n_zeros,
                            L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,
                            Lg_H, epsilon_perA, xi_perA2,
-                           Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None):
+                           Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None,
+                           Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
         """Add Foster 2 L stage components inline and return output node"""
-        
+
         current_node = start_node
         output_node = self.get_new_node()
-        
+
         # Handle L0LF2 - main series inductance
         self.add_inductance(f'0LF2_{k}', current_node, output_node, nonlinearity,
                           check_flat(L0LF2_H, k_idx), check_flat(L0LF2_rem_H, k_idx),
-                          Lg_H, epsilon_perA, xi_perA2, n_jj_struct)
+                          Lg_H, epsilon_perA, xi_perA2, n_jj_struct,
+                          Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
         
         # Handle CinfLF2 - parallel capacitance (across the series inductance)
         if check_flat(CinfLF2_F, k_idx) != 0:
@@ -1044,21 +1214,22 @@ class JCNetlistBuilder:
                            LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,
                            L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F,
                            Lg_H, epsilon_perA, xi_perA2,
-                           Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None):
+                           Ncpersc_cell=None, ind_g_C_with_filters=None, dispersion_type=None,
+                           Lj_numeric=None, Cj_numeric=None, Cjx_numeric=None):
         """Add filter stages inline and return output node"""
-        
+
         current_node = start_node
-        
+
         # Series filter (changes the node)
         if Foster_form_L == 1:
-            # Use local k_idx for series filter
             series_k_idx = k_idx
             if len(LinfLF1_H) == 1:
                 series_k_idx = 0
             current_node = self.add_foster1_L_stage(current_node, k, series_k_idx, nonlinearity, n_jj_struct, n_poles,
                                                   LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
                                                   Lg_H, epsilon_perA, xi_perA2,
-                                                  Ncpersc_cell, ind_g_C_with_filters, dispersion_type)
+                                                  Ncpersc_cell, ind_g_C_with_filters, dispersion_type,
+                                                  Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
         else:
             series_k_idx = k_idx
             if len(L0LF2_H) == 1:
@@ -1066,7 +1237,8 @@ class JCNetlistBuilder:
             current_node = self.add_foster2_L_stage(current_node, k, series_k_idx, nonlinearity, n_jj_struct, n_zeros,
                                                   L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,
                                                   Lg_H, epsilon_perA, xi_perA2,
-                                                  Ncpersc_cell, ind_g_C_with_filters, dispersion_type)
+                                                  Ncpersc_cell, ind_g_C_with_filters, dispersion_type,
+                                                  Lj_numeric=Lj_numeric, Cj_numeric=Cj_numeric, Cjx_numeric=Cjx_numeric)
         
         # Shunt filter (doesn't change the node) - use original k_idx
         if Foster_form_C == 1:
@@ -1358,7 +1530,153 @@ class JCNetlistBuilder:
         
         return current_node
 
-#####################################################################################    
+    def expand_floquet_TWPA(self, start_node, Ntot_cell, Ncpersc_cell, width,
+                           ind_g_C_with_filters, nonlinearity,
+                           LTLsec_rem_H, Lg_H, L0_H, epsilon_perA, xi_perA2,
+                           CJ_F, LTLsec_H, CTLsec_F, Ic_JJ_uA, ngL, ngC,
+                           Foster_form_L, Foster_form_C, n_jj_struct, n_poles, n_zeros,
+                           LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
+                           L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,
+                           LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,
+                           L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F,
+                           n_periodic_sc, n_filters_per_sc, n_periodic_sc_init,
+                           dispersion_type=None):
+        """Expand Floquet-tapered TWPA: taper cells use per-cell numeric values,
+        center cells use symbolic parameters (same as non-Floquet)."""
+
+        current_node = start_node
+        cell_idx = 0
+        p = 0  # Filter index tracker
+        nTLsec = self.workspace_data.get('nTLsec', 0)
+
+        def is_filter_cell(idx):
+            """Determine if cell is a filter position.
+
+            For both 'filter' and 'both' dispersion the filter cells recur every
+            Ncpersc_cell cells. `ind_g_C_with_filters` lists positions *within
+            one supercell* (not absolute indices along the whole line), so we
+            modulo by Ncpersc_cell before checking — otherwise only the first
+            supercell would actually get filters.
+            """
+            if dispersion_type == 'filter':
+                return (idx % Ncpersc_cell) == (nTLsec // 2)
+            elif dispersion_type == 'both':
+                if not ind_g_C_with_filters:
+                    return False
+                cell_in_sc = idx % Ncpersc_cell
+                return any(cell_in_sc == (pos % Ncpersc_cell) for pos in ind_g_C_with_filters)
+            return False
+
+        # Extract CTLsec pattern for center supercells
+        if hasattr(CTLsec_F, '__len__') and width > 0 and len(CTLsec_F) > 2 * width:
+            CTLsec_pattern = CTLsec_F[width:width + Ncpersc_cell]
+        elif hasattr(CTLsec_F, '__len__') and len(CTLsec_F) >= Ncpersc_cell:
+            CTLsec_pattern = CTLsec_F[:Ncpersc_cell]
+        else:
+            CTLsec_pattern = None
+
+        # Per-cell arrays for taper filter cells
+        floquet_params = self.workspace_data.get('floquet_cell_params', {})
+        L0_arr = floquet_params.get('L0_H')
+        Lj_dyn_arr = floquet_params.get('Lj_H')  # JJ kinetic inductance per cell
+        CJ_arr = floquet_params.get('CJ_F')
+        CJx_arr = floquet_params.get('Cj_extra_F')
+        ffc = self.workspace_data.get('floquet_filter_components', {})
+
+        def _taper_filter(idx):
+            """Add a filter cell in the taper using per-cell component values."""
+            # For JJ component: use Lj_dyn (the actual JJ kinetic inductance).
+            # For bare JJ: Lj_dyn == L0. For rf_squid: Lj_dyn != L0 (Lg adds in parallel).
+            # Falls back to L0 if Lj_dyn not present (e.g., KI nonlinearity).
+            if Lj_dyn_arr is not None:
+                lj_n = float(Lj_dyn_arr[idx])
+            elif L0_arr is not None:
+                lj_n = float(L0_arr[idx])
+            else:
+                lj_n = None
+            cj_n = float(CJ_arr[idx]) if CJ_arr is not None else None
+            cjx_n = float(CJx_arr[idx]) if CJx_arr is not None else None
+            f = ffc.get(idx, {})
+            self.force_numeric = True
+            self._taper_cell_idx = idx
+            result = self.add_filtered_stages(
+                current_node, idx, p, Foster_form_L, Foster_form_C, nonlinearity,
+                n_jj_struct, n_poles, n_zeros,
+                f.get('LinfLF1_H', LinfLF1_H), f.get('LinfLF1_rem_H', LinfLF1_rem_H),
+                f.get('C0LF1_F', C0LF1_F), f.get('LiLF1_H', LiLF1_H), f.get('CiLF1_F', CiLF1_F),
+                f.get('L0LF2_H', L0LF2_H), f.get('L0LF2_rem_H', L0LF2_rem_H),
+                f.get('CinfLF2_F', CinfLF2_F), f.get('LiLF2_H', LiLF2_H), f.get('CiLF2_F', CiLF2_F),
+                f.get('LinfCF1_H', LinfCF1_H), f.get('C0CF1_F', C0CF1_F),
+                f.get('LiCF1_H', LiCF1_H), f.get('CiCF1_F', CiCF1_F),
+                f.get('L0CF2_H', L0CF2_H), f.get('CinfCF2_F', CinfCF2_F),
+                f.get('LiCF2_H', LiCF2_H), f.get('CiCF2_F', CiCF2_F),
+                Lg_H, epsilon_perA, xi_perA2,
+                Ncpersc_cell, ind_g_C_with_filters, dispersion_type,
+                Lj_numeric=lj_n, Cj_numeric=cj_n, Cjx_numeric=cjx_n)
+            self.force_numeric = False
+            self._taper_cell_idx = None
+            return result
+
+        # 1. Left taper (cell-by-cell with per-cell numeric values)
+        for _ in range(width):
+            if is_filter_cell(cell_idx):
+                current_node = _taper_filter(cell_idx)
+                p += 1
+            else:
+                next_node = self.get_new_node()
+                self.add_inductance_floquet(f'TLsec_{cell_idx}', current_node, next_node,
+                                          cell_idx, nonlinearity, n_jj_struct)
+                cap_value = CTLsec_F[cell_idx] if hasattr(CTLsec_F, '__len__') else CTLsec_F
+                self.add_capacitor(f'TLsec_{cell_idx}', next_node, "0", cap_value,
+                                 Ncpersc_cell, is_windowed=True)
+                current_node = next_node
+            cell_idx += 1
+
+        # 2. Center (symbolic parameters, supercell pattern)
+        for sc in range(n_periodic_sc):
+            for j in range(Ncpersc_cell):
+                center_cell_idx = width + j
+                if is_filter_cell(center_cell_idx):
+                    current_node = self.add_filtered_stages(
+                        current_node, cell_idx, p, Foster_form_L, Foster_form_C, nonlinearity,
+                        n_jj_struct, n_poles, n_zeros,
+                        LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
+                        L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,
+                        LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,
+                        L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F,
+                        Lg_H, epsilon_perA, xi_perA2,
+                        Ncpersc_cell, ind_g_C_with_filters, dispersion_type)
+                    p += 1
+                else:
+                    next_node = self.get_new_node()
+                    self.add_inductance(f'TLsec_{cell_idx}', current_node, next_node,
+                                      nonlinearity, LTLsec_H, LTLsec_rem_H,
+                                      Lg_H, epsilon_perA, xi_perA2, n_jj_struct)
+                    cap_value = CTLsec_pattern[j] if CTLsec_pattern is not None else CTLsec_F
+                    self.add_capacitor(f'TLsec_{cell_idx}', next_node, "0", cap_value,
+                                     Ncpersc_cell)
+                    current_node = next_node
+                cell_idx += 1
+
+        # 3. Right taper (cell-by-cell with per-cell numeric values)
+        for i in range(width):
+            cell_idx_mapped = width + n_periodic_sc * Ncpersc_cell + i
+
+            if is_filter_cell(cell_idx_mapped):
+                current_node = _taper_filter(cell_idx_mapped)
+                p += 1
+            else:
+                next_node = self.get_new_node()
+                self.add_inductance_floquet(f'TLsec_{cell_idx_mapped}', current_node, next_node,
+                                          cell_idx_mapped, nonlinearity, n_jj_struct)
+                cap_value = CTLsec_F[cell_idx_mapped] if hasattr(CTLsec_F, '__len__') and cell_idx_mapped < len(CTLsec_F) else (CTLsec_F[-1] if hasattr(CTLsec_F, '__len__') else CTLsec_F)
+                self.add_capacitor(f'TLsec_{cell_idx_mapped}', next_node, "0", cap_value,
+                                 Ncpersc_cell, is_windowed=True)
+                current_node = next_node
+
+        return current_node
+
+#####################################################################################
 
 def load_design_parameters(design_file: str) -> Dict[str, Any]:
     """Load design parameters from file (Cell 3 from notebook)."""
@@ -1446,8 +1764,16 @@ def prepare_workspace_variables(design_data: Dict, netlist_config: NetlistConfig
     params['Nsc_cell'] = Nsc_cell
     params['Ntot_cell'] = Ntot_cell
     
-    # Calculate periodic supercells based on window type
-    if dispersion_type == 'both' and window_type.lower() == 'tukey':
+    # Calculate periodic supercells based on window/taper type. Either a Floquet
+    # nonlinearity taper or a standalone impedance taper triggers per-cell numeric
+    # expansion of the line (see helper_functions.compute_taper_arrays).
+    is_tapered = params.get('floquet_taper', False) or params.get('Z_taper', False)
+    is_floquet = is_tapered  # legacy alias used downstream
+    if is_floquet:
+        width = params.get('width', 0)
+        n_periodic_sc = params.get('n_periodic_sc', int((Ntot_cell - 2*width)/Ncpersc_cell))
+        n_periodic_sc_init = n_periodic_sc
+    elif dispersion_type == 'both' and window_type.lower() == 'tukey':
         width = params.get('width', 0)
         n_periodic_sc = int((Ntot_cell - 2*width)/Ncpersc_cell)
         n_periodic_sc_init = params.get('window_params', {}).get('n_periodic_sc', params.get('n_periodic_sc', Nsc_cell))
@@ -1615,7 +1941,84 @@ def prepare_workspace_variables(design_data: Dict, netlist_config: NetlistConfig
         'loss_tangent': netlist_config.loss_tangent,
         'use_linear_in_window': netlist_config.use_linear_in_window,
     }
-    
+
+    # Tapered TWPA: reconstruct per-cell parameters from saved config params.
+    # Calls the same shared helper as the designer to guarantee identical arrays.
+    if is_tapered:
+        from .helper_functions import compute_taper_arrays
+        workspace_vars['floquet_taper'] = True  # downstream expand_floquet_TWPA dispatch
+        workspace_vars['use_linear_in_window'] = False
+
+        # Resolve <X>_A from explicit <X>_A or <X>_uA, defaulting Id_A to 0.0
+        # so KI Taylor coefficients can be computed even when no bias is stored.
+        def _resolve_A(key_A, key_uA, default_A=None):
+            v = params.get(key_A)
+            if v is not None:
+                return v
+            v_uA = params.get(key_uA)
+            if v_uA is not None:
+                return v_uA * 1e-6
+            return default_A
+
+        Z0_env = 50  # environment impedance
+        Z0_TWPA = params.get('Z0_TWPA_ohm', 50)
+        LTLsec_H_center = params.get('LTLsec_H', L0_H)
+        g_L = np.sqrt(2)
+        g_C = np.sqrt(2)
+        fc_TLsec_center = params.get('fc_TLsec_GHz',
+                                     g_L * Z0_TWPA / (2 * np.pi * LTLsec_H_center) * 1e-9)
+
+        taper = compute_taper_arrays(
+            Ntot_cell=Ntot_cell, Ncpersc_cell=Ncpersc_cell,
+            Z_taper=params.get('Z_taper', False),
+            Z_taper_width=params.get('Z_taper_width', 0.3),
+            Z_profile=params.get('Z_profile', 'linear'),
+            klopfenstein_A=params.get('klopfenstein_A', None),
+            floquet_taper=params.get('floquet_taper', False),
+            floquet_taper_width=params.get('floquet_taper_width', 0.3),
+            floquet_profile=params.get('floquet_profile', 'gaussian'),
+            taper_cutoff=params.get('taper_cutoff', False),
+            Z0_ohm=Z0_env, Z0_TWPA_ohm=Z0_TWPA,
+            fc_TLsec_GHz=fc_TLsec_center,
+            LTLsec_H_center=LTLsec_H_center, L0_H_center=L0_H,
+            g_L=g_L, g_C=g_C,
+            nonlinearity=nonlinearity,
+            jj_structure_type=params.get('jj_structure_type', 'jj'),
+            phi_dc=params.get('phi_dc', 0),
+            beta_L=params.get('beta_L'),
+            LJ0_H=params.get('LJ0_H'),
+            Lg_H=params.get('Lg_H'),
+            CJ_F=params.get('CJ_F'),
+            Ic_JJ_A=_resolve_A('Ic_JJ_A', 'Ic_JJ_uA'),
+            Istar_A=_resolve_A('Istar_A', 'Istar_uA'),
+            Id_A=_resolve_A('Id_A', 'Id_uA', default_A=0.0),
+            L0_pH=params.get('L0_pH'),
+            n_jj_struct=params.get('n_jj_struct', 1),
+            LinfLF1_H=params.get('LinfLF1_H'),
+            L0LF2_H=params.get('L0LF2_H'),
+            Foster_form_L=Foster_form_L,
+            Foster_form_C=Foster_form_C,
+            zero_at_zero=params.get('zero_at_zero', True),
+            select_one_form=params.get('select_one_form', 'C'),
+            f_zeros_GHz=params.get('f_zeros_GHz', np.array([])),
+            f_poles_GHz=params.get('f_poles_GHz', np.array([])),
+            dispersion_type=dispersion_type,
+            g_C_mod=params.get('g_C_mod'),
+            rf_squid_constant_plasma=params.get('rf_squid_constant_plasma', False),
+        )
+
+        workspace_vars['floquet_weights'] = taper['w_percell']
+        workspace_vars['floquet_center_start'] = taper['center_start']
+        workspace_vars['floquet_center_end'] = taper['center_end']
+        workspace_vars['floquet_cell_params'] = taper['floquet_cell_params']
+        if nonlinearity == 'JJ' and jj_structure_type == 'rf_squid':
+            workspace_vars['Lg_H_value'] = params.get('Lg_H')
+
+        if taper['linear_varies']:
+            params['CTLsec_F'] = taper['CTLsec_F']
+            params['LTLsec_H_percell'] = taper['LTLsec_H_percell']
+            workspace_vars['floquet_filter_components'] = taper['floquet_filter_components']
+
     # Create and configure the builder
     builder = JCNetlistBuilder()
     builder.load_workspace_data(workspace_vars)
@@ -1783,16 +2186,31 @@ def build_netlist(prepared_data: Dict) -> Tuple[JCNetlistBuilder, Dict[str, Any]
     LiCF2_H = params.get('LiCF2_H', [])
     CiCF2_F = params.get('CiCF2_F', [])
     
-    # Build the main structure
-    if dispersion_type == 'filter' or ((dispersion_type == 'periodic' or dispersion_type == 'both') and window_type.lower() == 'boxcar'):
+    # Build the main structure. Either taper triggers per-cell numeric expansion.
+    is_floquet = params.get('floquet_taper', False) or params.get('Z_taper', False)
+    Ntot_cell = params.get('Ntot_cell', Nsc_cell * Ncpersc_cell)
+
+    if is_floquet:
+        current_node = builder.expand_floquet_TWPA(
+            current_node, Ntot_cell, Ncpersc_cell, width,
+            ind_g_C_with_filters, nonlinearity,
+            LTLsec_rem_H, Lg_H, L0_H, epsilon_perA, xi_perA2,
+            params.get('CJ_F'), LTLsec_H, CTLsec_F, params.get('Ic_JJ_uA'), ngL, ngC,
+            Foster_form_L, Foster_form_C, n_jj_struct, n_poles, n_zeros,
+            LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
+            L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,
+            LinfCF1_H, C0CF1_F, LiCF1_H, CiCF1_F,
+            L0CF2_H, CinfCF2_F, LiCF2_H, CiCF2_F,
+            n_periodic_sc, n_filters_per_sc, n_periodic_sc_init, dispersion_type)
+    elif dispersion_type == 'filter' or ((dispersion_type == 'periodic' or dispersion_type == 'both') and window_type.lower() == 'boxcar'):
         # Expand supercells inline
         for i in range(1, Nsc_cell + 1):
             current_node = builder.expand_supercell_inline(
-                i, current_node, Ncpersc_cell, width, 
-                ind_g_C_with_filters, nonlinearity, 
-                LTLsec_rem_H, Lg_H, L0_H, epsilon_perA, 
-                xi_perA2, params.get('CJ_F'), LTLsec_H, CTLsec_F, 
-                params.get('Ic_JJ_uA'), ngL, ngC, Foster_form_L, 
+                i, current_node, Ncpersc_cell, width,
+                ind_g_C_with_filters, nonlinearity,
+                LTLsec_rem_H, Lg_H, L0_H, epsilon_perA,
+                xi_perA2, params.get('CJ_F'), LTLsec_H, CTLsec_F,
+                params.get('Ic_JJ_uA'), ngL, ngC, Foster_form_L,
                 Foster_form_C, n_jj_struct, n_poles, n_zeros,
                 LinfLF1_H, LinfLF1_rem_H, C0LF1_F, LiLF1_H, CiLF1_F,
                 L0LF2_H, L0LF2_rem_H, CinfLF2_F, LiLF2_H, CiLF2_F,

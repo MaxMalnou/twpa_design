@@ -47,10 +47,22 @@ NETLIST_CONFIGS = {
     'ktwpa': {
         'design_file': '4wm_ktwpa_01.py',
         'Ntot_cell_override': 5000,  # Override total number of cells
+    },    
+    'floquet_jtwpa': {
+        'design_file': 'floquet_jtwpa_01.py',        
+    },
+    'rfsq_twpa': {
+        'design_file': 'rfsq_twpa_01.py',        
+    },
+    'floquet_rfsq_twpa': {
+        'design_file': 'floquet_rfsq_twpa_01.py',        
+    },    
+    'floquet_ktwpa': {
+        'design_file': 'floquet_ktwpa_01.py',        
     }
 }
 
-simulation_type = "jtwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa'
+simulation_type = "floquet_ktwpa"  # Choose: 'jtwpa', 'b_jtwpa', 'ktwpa', 'floquet_jtwpa', 'floquet_rfsq_twpa', 'floquet_ktwpa'
 
 # Get the config for the chosen netlist
 if simulation_type in NETLIST_CONFIGS:
