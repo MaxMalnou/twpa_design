@@ -171,18 +171,28 @@ twpa_design/
     ├── designs/                    # Example TWPA designs
     │   ├── 4wm_jtwpa_01.py
     │   ├── 4wm_ktwpa_01.py
-    │   └── b_jtwpa_01.py
+    │   ├── b_jtwpa_01.py
+    │   ├── rfsq_twpa_01.py
+    │   ├── floquet_jtwpa_01.py
+    │   ├── floquet_ktwpa_01.py
+    │   └── floquet_rfsq_twpa_01.py
     ├── examples/                   # Usage examples
     │   ├── atl_twpa_designer_example.py
     │   ├── atl_twpa_plotter_example.py
+    │   ├── designer_and_JC_plotter_example.py
     │   ├── netlist_JC_builder_example.py
     │   ├── julia_wrapper_example.py
+    │   ├── julia_plotter_example.py
     │   ├── diplexer_twpa_example.py
     │   └── twpa_twpa_example.py
     ├── netlists/                   # Example circuit netlists
     │   ├── 4wm_jtwpa_2002cells_01.py
     │   ├── 4wm_ktwpa_5004cells_01.py
     │   ├── b_jtwpa_2000cells_01.py
+    │   ├── rfsq_twpa_2497cells_01.py
+    │   ├── floquet_jtwpa_2497cells_01.py
+    │   ├── floquet_ktwpa_9996cells_01.py
+    │   ├── floquet_rfsq_twpa_2497cells_01.py
     │   ├── diplexed_4wm_jtwpa_2002cells_01.py
     │   └── twpa_twpa_4wm_jtwpa_2002cells_01.py
     ├── notebooks/                  # Jupyter tutorials
@@ -192,16 +202,15 @@ twpa_design/
     │   ├── JJvsNL_comparison.ipynb
     │   └── netlist_JC_builder.ipynb
     ├── results/                    # Example simulation results
-    │   ├── 4wm_jtwpa_2002cells_01_pump8.63GHz_01.npz
-    │   ├── 4wm_jtwpa_2002cells_01_pump8.63GHz_01.svg
-    │   ├── 4wm_ktwpa_5004cells_01_pump9.10GHz_01.npz
-    │   ├── 4wm_ktwpa_5004cells_01_pump9.10GHz_01.svg
-    │   ├── b_jtwpa_2000cells_01_pump16.12GHz_01.npz
-    │   ├── b_jtwpa_2000cells_01_pump16.12GHz_01.svg
-    │   ├── diplexed_4wm_jtwpa_2002cells_01_pump8.63GHz_01.npz
-    │   ├── diplexed_4wm_jtwpa_2002cells_01_pump8.63GHz_01.svg
-    │   ├── twpa_twpa_4wm_jtwpa_2002cells_01_pump8.55GHz_01.npz
-    │   └── twpa_twpa_4wm_jtwpa_2002cells_01_pump8.55GHz_01.svg
+    │   ├── 4wm_jtwpa_2002cells_01_pump8.63GHz_01.{npz,svg}
+    │   ├── 4wm_ktwpa_5004cells_01_pump9.10GHz_01.{npz,svg}
+    │   ├── b_jtwpa_2000cells_01_pump14.98GHz_01.{npz,svg}
+    │   ├── rfsq_twpa_2497cells_01_pump8.65GHz_01.{npz,svg}
+    │   ├── floquet_jtwpa_2497cells_01_pump8.65GHz_01.{npz,svg}
+    │   ├── floquet_ktwpa_9996cells_01_pump9.40GHz_01.{npz,svg}
+    │   ├── floquet_rfsq_twpa_2497cells_01_pump8.65GHz_01.{npz,svg}
+    │   ├── diplexed_4wm_jtwpa_2002cells_01_pump8.63GHz_01.{npz,svg}
+    │   └── twpa_twpa_4wm_jtwpa_2002cells_01_pump8.55GHz_01.{npz,svg}
     └── external_packages/          # JosephsonCircuits.jl fork
         └── JosephsonCircuits.jl/   # Fork with Taylor expansion NL elements
             ├── README.md           # Fork documentation and usage
@@ -342,7 +351,24 @@ Available: https://github.com/MaxMalnou/twpa_design
 
 If you use the design methodologies or simulation framework, please also cite:
 
+> M. Malnou, *Synthesis of artificial transmission lines tailored for traveling-wave parametric processes*, **Phys. Rev. Appl. 25, 054016** (2026). [doi:10.1103/pz45-3xpn](https://link.aps.org/doi/10.1103/pz45-3xpn) — preprint: [arXiv:2510.24753](https://arxiv.org/abs/2510.24753)
+
 ```bibtex
+@article{malnou2026synthesis,
+  title = {Synthesis of artificial transmission lines tailored for traveling-wave parametric processes},
+  author = {Malnou, M.},
+  journal = {Phys. Rev. Appl.},
+  volume = {25},
+  issue = {5},
+  pages = {054016},
+  numpages = {19},
+  year = {2026},
+  month = {May},
+  publisher = {American Physical Society},
+  doi = {10.1103/pz45-3xpn},
+  url = {https://link.aps.org/doi/10.1103/pz45-3xpn}
+}
+
 @misc{malnou2025artificial,
   title = {Artificial Transmission Line Synthesis Tailored for Traveling-Wave Parametric Processes},
   author = {M. Malnou},
